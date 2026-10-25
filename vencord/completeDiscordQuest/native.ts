@@ -19,6 +19,7 @@ CspPolicies["wss://*.ariseworlds.com"] = ConnectSrc;
 const ACTIVITY_DOMAIN_RE = /^(?:https?|wss?):\/\/([a-z0-9-]+\.)*(?:discordsays|ariseworlds)\.com(?:\/|$)/i;
 const DISCORDSAYS_DOMAIN_RE = /^https:\/\/([a-z0-9-]+\.discordsays\.com)(?:\/|$)/i;
 const DISCORD_ORIGIN_RE = /^https:\/\/(?:ptb\.|canary\.)?discord\.com(?:\/|$)/i;
+const ALLOWED_ACTIVITY_CALLER_ORIGIN_RE = /^https:\/\/(?:(?:ptb\.|canary\.)?discord\.com|(?:[a-z0-9-]+\.)*(?:discordsays|ariseworlds)\.com)$/i;
 
 function findHeaderKey(headers: Record<string, any>, lowerName: string): string | undefined {
     return Object.keys(headers).find(k => k.toLowerCase() === lowerName);
@@ -46,7 +47,13 @@ function extractOriginFromUrl(rawUrl: unknown): string {
 function sanitizeActivityResponseHeaders(responseHeaders: Record<string, string[]>, callerOrigin?: string): void {
     const existingOriginKey = findHeaderKey(responseHeaders, "access-control-allow-origin");
     const existingOrigin = existingOriginKey ? responseHeaders[existingOriginKey]?.[0] : undefined;
-    const allowOrigin = callerOrigin || (existingOrigin && existingOrigin !== "*" ? existingOrigin : "https://discord.com");
+    const validCallerOrigin =
+        callerOrigin && ALLOWED_ACTIVITY_CALLER_ORIGIN_RE.test(callerOrigin) ? callerOrigin : undefined;
+    const validExistingOrigin =
+        existingOrigin && existingOrigin !== "*" && ALLOWED_ACTIVITY_CALLER_ORIGIN_RE.test(existingOrigin)
+            ? existingOrigin
+            : undefined;
+    const allowOrigin = validCallerOrigin || validExistingOrigin || "https://discord.com";
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-origin", [allowOrigin]);
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-credentials", ["true"]);
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-methods", [
@@ -140,7 +147,7 @@ function installActivityCorsAndPreflightBypass(): void {
                         const headers = resp?.responseHeaders || details.responseHeaders || (isActivityUrl ? {} : undefined);
                         if (headers && isActivityUrl) {
                             sanitizeActivityResponseHeaders(headers, callerOrigin);
-                            if (details.method === "OPTIONS" || (details.method === "OPTIONS" && details.statusCode >= 400)) {
+                            if (details.method === "OPTIONS") {
                                 cb({
                                     ...resp,
                                     cancel: false,
@@ -330,7 +337,10 @@ export interface SolvedShotScoreRun {
     at: number;
     previouslyCompleted: boolean;
     shotTtksMs: number[];
+    interKillGapsMs: number[];
     cumulativeMs: number[];
+    shotDeltas: number[];
+    runningTotals: number[];
 }
 
 /**
@@ -344,7 +354,7 @@ export interface SolvedShotScoreRun {
 function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): SolvedShotScoreRun {
     const rawNum = Number(targetScore);
     const validTarget = Number.isFinite(rawNum) && rawNum > 0 ? Math.round(rawNum) : (meta.fallbackTop2 + 1);
-    const T = Math.max(2000, Math.min(meta.ceiling, validTarget));
+    const T = Math.max(2000, Math.min(meta.ceiling - 1, validTarget));
     const maxMatchScore = Math.round(meta.ceiling / 5.2);
 
     let chosenS = maxMatchScore;
@@ -428,15 +438,32 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
 
     const cumulativeMs: number[] = [];
     let cursorMs = 1150;
-    const interKillGaps = [0, 1420, 1680, 1340, 1590];
+    const interKillGapsMs = [0, 1420, 1680, 1340, 1590];
     for (let k = 0; k < 5; k++) {
-        cursorMs += interKillGaps[k] + shotTtksMs[k];
+        cursorMs += interKillGapsMs[k] + shotTtksMs[k];
         cumulativeMs.push(cursorMs);
     }
 
+    // In ShotScore._finalize (game-scripts.js), end-of-round bonuses are multikill(5)=200 + aceBonus=200 + completionBonus=150 = 550.
+    // During the round, AriseAnalytics._flushShot sends per-shot base score delta and cumulative base running total.
+    const baseKillsTotal = Math.max(500, chosenS - 550);
+    const basePerKill = Math.floor(baseKillsTotal / 5);
+    const scoreOffsets = [-12, -5, 0, 6, 11];
+    const shotDeltas = scoreOffsets.map(off => Math.max(80, basePerKill + off));
+    const deltaSum = shotDeltas.reduce((a, b) => a + b, 0);
+    shotDeltas[4] += baseKillsTotal - deltaSum;
+    const runningTotals: number[] = [];
+    let runningAcc = 0;
+    for (let k = 0; k < 5; k++) {
+        runningAcc += shotDeltas[k];
+        runningTotals.push(runningAcc);
+    }
+
+    const actualTotal = Math.round(chosenS * chosenTtkMult * 2.0);
+
     return {
         v: 2,
-        total: T,
+        total: actualTotal,
         matchScore: chosenS,
         accMult: 2,
         ttkMult: chosenTtkMult,
@@ -451,13 +478,16 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
         bestTtk,
         ace: true,
         flawless: true,
-        team: meta.team,
+        team: meta.team.toLowerCase(),
         experience: meta.experience,
         levelId: meta.aceTag,
         at: Date.now(),
         previouslyCompleted: true,
         shotTtksMs,
-        cumulativeMs
+        interKillGapsMs,
+        cumulativeMs,
+        shotDeltas,
+        runningTotals
     };
 }
 
@@ -467,10 +497,15 @@ interface AriseSessionTelemetryState {
     userId: string;
     universeId: string;
     appVersion: string;
+    sessionStartMs: number;
     sessionDurationMs: number;
+    completedAceCount: number;
+    storedBestTotal: number;
 }
 
-const ariseTelemetrySessionByUser = new Map<string, AriseSessionTelemetryState>();
+const gState = globalThis as any;
+const ariseTelemetrySessionByUser: Map<string, AriseSessionTelemetryState> =
+    (gState.__vcAriseTelemetrySessionByUser ??= new Map<string, AriseSessionTelemetryState>());
 
 function getOrCreateAriseSessionState(
     userKey: string,
@@ -481,13 +516,17 @@ function getOrCreateAriseSessionState(
     const key = userKey || "default";
     let state = ariseTelemetrySessionByUser.get(key);
     if (!state) {
+        const initialDurationMs = 42000 + Math.floor(Math.random() * 18000);
         state = {
             sessionId: randomUUID(),
             deviceId: deviceIdHint || randomUUID(),
             userId: userKey !== "default" ? userKey : "",
             universeId,
             appVersion,
-            sessionDurationMs: 48000 + Math.floor(Math.random() * 24000)
+            sessionStartMs: Date.now() - initialDurationMs,
+            sessionDurationMs: initialDurationMs,
+            completedAceCount: 0,
+            storedBestTotal: 0
         };
         ariseTelemetrySessionByUser.set(key, state);
     } else {
@@ -506,9 +545,12 @@ async function sendAriseScrollV2Event(
     state: AriseSessionTelemetryState,
     eventType: string,
     strings: string[],
-    numbers: number[]
+    numbers: number[],
+    deltaMs: number,
+    isExternal = true
 ): Promise<void> {
-    state.sessionDurationMs += 1400 + Math.floor(Math.random() * 1900);
+    state.sessionDurationMs += Math.max(1, Math.round(deltaMs));
+    const eventTimestamp = state.sessionStartMs + state.sessionDurationMs;
     const body = JSON.stringify({
         sessionId: state.sessionId,
         deviceId: state.deviceId,
@@ -516,12 +558,12 @@ async function sendAriseScrollV2Event(
         userId: state.userId || undefined,
         universeId: state.universeId || DEFAULT_UNIVERSE_ID,
         deviceType: "desktop",
-        timestamp: Date.now(),
+        timestamp: eventTimestamp,
         sessionDuration: state.sessionDurationMs,
         platform: "discord",
         metadata: { strings, numbers },
         appVersion: state.appVersion || DEFAULT_ARISE_CLIENT,
-        isExternal: true
+        isExternal
     });
     await fetch(`${baseOrigin}/.proxy/api/scrollv2`, {
         method: "POST",
@@ -539,6 +581,18 @@ async function sendAriseScrollV2RunTelemetry(
     run: SolvedShotScoreRun,
     state: AriseSessionTelemetryState
 ): Promise<void> {
+    const selectDeltaMs = 1150 + Math.floor(Math.random() * 650);
+    await sendAriseScrollV2Event(
+        baseOrigin,
+        ariseToken,
+        buildHeaders,
+        state,
+        "checkpoint",
+        ["select_player"],
+        [state.sessionDurationMs + selectDeltaMs, 3],
+        selectDeltaMs,
+        false
+    );
     await sendAriseScrollV2Event(
         baseOrigin,
         ariseToken,
@@ -546,9 +600,24 @@ async function sendAriseScrollV2RunTelemetry(
         state,
         "play_player",
         [meta.playerName, meta.teamCode, meta.aceTag],
-        []
+        [],
+        2 + Math.floor(Math.random() * 3),
+        true
+    );
+    const playBtnDeltaMs = 1650 + Math.floor(Math.random() * 550);
+    await sendAriseScrollV2Event(
+        baseOrigin,
+        ariseToken,
+        buildHeaders,
+        state,
+        "checkpoint",
+        ["play_button_2"],
+        [state.sessionDurationMs + playBtnDeltaMs, 4],
+        playBtnDeltaMs,
+        false
     );
     for (let i = 0; i < 5; i++) {
+        const shotDeltaMs = (i === 0 ? 1150 : run.interKillGapsMs[i]) + run.shotTtksMs[i];
         await sendAriseScrollV2Event(
             baseOrigin,
             ariseToken,
@@ -556,17 +625,31 @@ async function sendAriseScrollV2RunTelemetry(
             state,
             "shot_taken",
             ["headshot"],
-            [run.shotTtksMs[i], run.cumulativeMs[i]]
+            [run.shotDeltas[i], run.runningTotals[i]],
+            shotDeltaMs,
+            true
         );
     }
+    state.completedAceCount = Math.min(10, state.completedAceCount + 1);
+    state.storedBestTotal = Math.max(state.storedBestTotal, run.total);
     await sendAriseScrollV2Event(
         baseOrigin,
         ariseToken,
         buildHeaders,
         state,
         "completed",
-        [meta.aceTag, meta.team.toLowerCase()],
-        [run.total, 1, run.total, 100, Number(run.meanTtk.toFixed(3)), Number(run.bestTtk.toFixed(3)), 0]
+        [meta.aceTag, run.team],
+        [
+            run.total,
+            state.completedAceCount,
+            state.storedBestTotal,
+            100,
+            Number(run.meanTtk.toFixed(3)),
+            Number(run.bestTtk.toFixed(3)),
+            0
+        ],
+        280 + Math.floor(Math.random() * 140),
+        true
     );
 }
 
@@ -591,8 +674,14 @@ interface BoardTargetResolution {
     solvedRun: SolvedShotScoreRun;
 }
 
-const resolvedTargetsCache = new Map<string, { at: number; resolutions: BoardTargetResolution[] }>();
-const unlockedProfileRewardsByUser = new Set<string>();
+const resolvedTargetsCache: Map<string, { at: number; resolutions: BoardTargetResolution[] }> =
+    (gState.__vcAriseResolvedTargetsCache ??= new Map<string, { at: number; resolutions: BoardTargetResolution[] }>());
+const inFlightResolutionsByKey: Map<string, Promise<BoardTargetResolution[]>> =
+    (gState.__vcAriseInFlightResolutions ??= new Map<string, Promise<BoardTargetResolution[]>>());
+const inFlightUnlocksByKey: Map<string, Promise<BoardTargetResolution[]>> =
+    (gState.__vcAriseInFlightUnlocks ??= new Map<string, Promise<BoardTargetResolution[]>>());
+const unlockedProfileRewardsByUser: Set<string> =
+    (gState.__vcAriseUnlockedProfileRewards ??= new Set<string>());
 
 async function resolveTargetScoresForBoards(
     baseOrigin: string,
@@ -608,97 +697,111 @@ async function resolveTargetScoresForBoards(
         return cached.resolutions;
     }
 
-    const resolutions = await Promise.all(
-        VALORANT_ACES_BOARDS.map(async (meta): Promise<BoardTargetResolution> => {
-            let otherTopScore = meta.fallbackTop2;
-            let myCurrentScore: number | null = null;
-            let myCurrentPosition: number | null = null;
+    const existingInFlight = inFlightResolutionsByKey.get(cacheKey);
+    if (existingInFlight) {
+        return existingInFlight;
+    }
 
-            if (ariseToken) {
-                try {
-                    const res = await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}`, {
-                        method: "GET",
-                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
-                        signal: AbortSignal.timeout(8000)
-                    });
-                    if (res.ok) {
-                        const data: any = await res.json().catch(() => null);
-                        if (data) {
-                            const { me } = data;
-                            if (me && typeof me.score === "number") {
-                                myCurrentScore = me.score;
-                            }
-                            if (me && typeof me.position === "number") {
-                                myCurrentPosition = me.position;
-                            }
+    const task = (async (): Promise<BoardTargetResolution[]> => {
+        const resolutions = await Promise.all(
+            VALORANT_ACES_BOARDS.map(async (meta): Promise<BoardTargetResolution> => {
+                let otherTopScore = meta.fallbackTop2;
+                let myCurrentScore: number | null = null;
+                let myCurrentPosition: number | null = null;
 
-                            const candidates: number[] = [];
-                            const collect = (arr: any[]) => {
-                                if (!Array.isArray(arr)) return;
-                                for (const entry of arr) {
-                                    if (!entry || typeof entry.score !== "number") continue;
-                                    if (myUserId && entry.userId === myUserId) continue;
-                                    if (me?.userId && entry.userId === me.userId) continue;
-                                    candidates.push(entry.score);
+                if (ariseToken) {
+                    try {
+                        const res = await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}`, {
+                            method: "GET",
+                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
+                            signal: AbortSignal.timeout(8000)
+                        });
+                        if (res.ok) {
+                            const data: any = await res.json().catch(() => null);
+                            if (data) {
+                                const { me } = data;
+                                if (me && typeof me.score === "number") {
+                                    myCurrentScore = me.score;
                                 }
-                            };
-                            collect(data.topN);
-                            collect(me?.surrounding?.above);
-                            collect(me?.surrounding?.below);
+                                if (me && typeof me.position === "number") {
+                                    myCurrentPosition = me.position;
+                                }
 
-                            if (candidates.length > 0) {
-                                otherTopScore = Math.max(...candidates);
+                                const candidates: number[] = [];
+                                const collect = (arr: any[]) => {
+                                    if (!Array.isArray(arr)) return;
+                                    for (const entry of arr) {
+                                        if (!entry || typeof entry.score !== "number") continue;
+                                        if (myUserId && entry.userId === myUserId) continue;
+                                        if (me?.userId && entry.userId === me.userId) continue;
+                                        candidates.push(entry.score);
+                                    }
+                                };
+                                collect(data.topN);
+                                collect(me?.surrounding?.above);
+                                collect(me?.surrounding?.below);
+
+                                if (candidates.length > 0) {
+                                    otherTopScore = Math.max(...candidates);
+                                }
                             }
                         }
-                    }
-                } catch {}
-            }
+                    } catch {}
+                }
 
-            let targetScore: number;
-            if (scoreMode === "custom") {
-                const rawCustom = Math.round(Number(customScore) || 24500);
-                targetScore = Math.max(1000, Math.min(meta.ceiling - 1, rawCustom));
-            } else if (scoreMode === "legit_pro") {
-                targetScore = meta.legitProScore;
-            } else {
-                // "top1_plus_1" (or UI fallback for "quest_only"): strictly Top-2 + 1, capped below ceiling - 50
-                targetScore = Math.max(1000, Math.min(meta.ceiling - 50, otherTopScore + 1));
-            }
+                let desiredScore: number;
+                if (scoreMode === "custom") {
+                    const rawCustom = Math.round(Number(customScore) || 24500);
+                    desiredScore = Math.max(2000, Math.min(meta.ceiling - 1, rawCustom));
+                } else if (scoreMode === "legit_pro") {
+                    desiredScore = meta.legitProScore;
+                } else {
+                    // "top1_plus_1" (or UI fallback for "quest_only"): strictly Top-2 + 1, capped below ceiling - 50
+                    desiredScore = Math.max(2000, Math.min(meta.ceiling - 50, otherTopScore + 1));
+                }
 
-            let shouldSubmit = false;
-            if (scoreMode === "quest_only") {
-                shouldSubmit = false;
-            } else if (scoreMode === "top1_plus_1") {
-                // If already #1 above otherTopScore, do not spam redundant submissions; otherwise beat otherTopScore by +1
-                if (myCurrentPosition === 1 && myCurrentScore !== null && myCurrentScore > otherTopScore) {
+                const solvedRun = solveShotScoreRun(desiredScore, meta);
+                const targetScore = solvedRun.total;
+
+                let shouldSubmit = false;
+                if (scoreMode === "quest_only") {
                     shouldSubmit = false;
-                } else if (myCurrentScore === null || myCurrentScore <= otherTopScore) {
-                    shouldSubmit = true;
+                } else if (scoreMode === "top1_plus_1") {
+                    // If already #1 above otherTopScore, do not spam redundant submissions; otherwise beat otherTopScore by +1
+                    if (myCurrentPosition === 1 && myCurrentScore !== null && myCurrentScore > otherTopScore) {
+                        shouldSubmit = false;
+                    } else if (myCurrentScore === null || myCurrentScore <= otherTopScore) {
+                        shouldSubmit = true;
+                    }
+                } else {
+                    // "custom" or "legit_pro": Arise server only accepts improvements (score > existing)
+                    if (myCurrentScore === null || myCurrentScore < targetScore) {
+                        shouldSubmit = true;
+                    }
                 }
-            } else {
-                // "custom" or "legit_pro": Arise server only accepts improvements (score > existing)
-                if (myCurrentScore === null || myCurrentScore < targetScore) {
-                    shouldSubmit = true;
-                }
-            }
 
-            const solvedRun = solveShotScoreRun(targetScore, meta);
-            return {
-                meta,
-                otherTopScore,
-                myCurrentScore,
-                myCurrentPosition,
-                targetScore,
-                shouldSubmit,
-                solvedRun
-            };
-        })
-    );
+                return {
+                    meta,
+                    otherTopScore,
+                    myCurrentScore,
+                    myCurrentPosition,
+                    targetScore,
+                    shouldSubmit,
+                    solvedRun
+                };
+            })
+        );
 
-    if (ariseToken) {
-        resolvedTargetsCache.set(cacheKey, { at: Date.now(), resolutions });
-    }
-    return resolutions;
+        if (ariseToken) {
+            resolvedTargetsCache.set(cacheKey, { at: Date.now(), resolutions });
+        }
+        return resolutions;
+    })().finally(() => {
+        inFlightResolutionsByKey.delete(cacheKey);
+    });
+
+    inFlightResolutionsByKey.set(cacheKey, task);
+    return task;
 }
 
 async function unlockAllAriseRewardsAndScores(
@@ -710,85 +813,98 @@ async function unlockAllAriseRewardsAndScores(
     customScore = 24500,
     deviceIdHint?: string
 ): Promise<BoardTargetResolution[]> {
-    let resolutions: BoardTargetResolution[] = [];
-    try {
-        const userKey = extractSubFromJwt(ariseToken) || "default";
-        const sampleHeaders = buildHeaders(ariseToken);
-        const universeId = sampleHeaders["X-Universe-ID"] || DEFAULT_UNIVERSE_ID;
-        const appVersion = sampleHeaders["X-Arise-Client"] || DEFAULT_ARISE_CLIENT;
+    const userKey = extractSubFromJwt(ariseToken) || "default";
+    const unlockKey = `${baseOrigin}:${userKey}:${isValorantAces ? "aces" : "generic"}:${scoreMode}:${customScore}`;
+    const existingUnlock = inFlightUnlocksByKey.get(unlockKey);
+    if (existingUnlock) {
+        return existingUnlock;
+    }
 
-        const requests: Promise<any>[] = [];
-        const profileKey = `${baseOrigin}:${userKey}:${isValorantAces ? "aces" : "generic"}`;
-        if (!unlockedProfileRewardsByUser.has(profileKey)) {
-            unlockedProfileRewardsByUser.add(profileKey);
-            requests.push(
-                fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
-                    method: "POST",
-                    headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
-                    body: undefined,
-                    signal: AbortSignal.timeout(8000)
-                }).catch(() => null)
-            );
+    const unlockTask = (async (): Promise<BoardTargetResolution[]> => {
+        let resolutions: BoardTargetResolution[] = [];
+        try {
+            const sampleHeaders = buildHeaders(ariseToken);
+            const universeId = sampleHeaders["X-Universe-ID"] || DEFAULT_UNIVERSE_ID;
+            const appVersion = sampleHeaders["X-Arise-Client"] || DEFAULT_ARISE_CLIENT;
 
-            if (isValorantAces) {
+            const requests: Promise<any>[] = [];
+            const profileKey = `${baseOrigin}:${userKey}:${isValorantAces ? "aces" : "generic"}`;
+            if (!unlockedProfileRewardsByUser.has(profileKey)) {
+                unlockedProfileRewardsByUser.add(profileKey);
                 requests.push(
-                    ...VALORANT_ACES_TITLES.map(id => {
-                        const body = JSON.stringify({ id });
-                        return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
-                            method: "POST",
-                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                            body,
-                            signal: AbortSignal.timeout(8000)
-                        }).catch(() => null);
-                    }),
-                    ...VALORANT_ACES_BADGES.map(rank => {
-                        const body = JSON.stringify({ rank });
-                        return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
-                            method: "POST",
-                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                            body,
-                            signal: AbortSignal.timeout(8000)
-                        }).catch(() => null);
-                    })
-                );
-            }
-        }
-
-        if (isValorantAces) {
-            resolutions = await resolveTargetScoresForBoards(baseOrigin, ariseToken, buildHeaders, scoreMode, customScore);
-            if (scoreMode !== "quest_only") {
-                const sessionState = getOrCreateAriseSessionState(userKey, deviceIdHint, universeId, appVersion);
-
-                for (const item of resolutions) {
-                    if (!item.shouldSubmit) continue;
-                    // Mark as submitted immediately so cached resolutions within the 20s TTL are never re-submitted
-                    item.shouldSubmit = false;
-                    item.myCurrentScore = Math.max(item.myCurrentScore ?? 0, item.targetScore);
-
-                    await sendAriseScrollV2RunTelemetry(
-                        baseOrigin,
-                        ariseToken,
-                        buildHeaders,
-                        item.meta,
-                        item.solvedRun,
-                        sessionState
-                    );
-                    const submitBody = JSON.stringify({ score: item.targetScore });
-                    await fetch(`${baseOrigin}/.proxy/api/leaderboards/${item.meta.boardId}/submit`, {
+                    fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
                         method: "POST",
-                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(submitBody) }),
-                        body: submitBody,
+                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
+                        body: undefined,
                         signal: AbortSignal.timeout(8000)
-                    }).catch(() => null);
+                    }).catch(() => null)
+                );
+
+                if (isValorantAces) {
+                    requests.push(
+                        ...VALORANT_ACES_TITLES.map(id => {
+                            const body = JSON.stringify({ id });
+                            return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
+                                method: "POST",
+                                headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                                body,
+                                signal: AbortSignal.timeout(8000)
+                            }).catch(() => null);
+                        }),
+                        ...VALORANT_ACES_BADGES.map(rank => {
+                            const body = JSON.stringify({ rank });
+                            return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
+                                method: "POST",
+                                headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                                body,
+                                signal: AbortSignal.timeout(8000)
+                            }).catch(() => null);
+                        })
+                    );
                 }
             }
-        }
 
-        if (requests.length > 0) {
-            await Promise.allSettled(requests);
-        }
-    } catch {}
-    return resolutions;
+            if (isValorantAces) {
+                resolutions = await resolveTargetScoresForBoards(baseOrigin, ariseToken, buildHeaders, scoreMode, customScore);
+                if (scoreMode !== "quest_only") {
+                    const sessionState = getOrCreateAriseSessionState(userKey, deviceIdHint, universeId, appVersion);
+
+                    for (const item of resolutions) {
+                        if (!item.shouldSubmit) continue;
+                        // Mark as submitted immediately so cached resolutions within the 20s TTL are never re-submitted
+                        item.shouldSubmit = false;
+                        item.myCurrentScore = Math.max(item.myCurrentScore ?? 0, item.targetScore);
+
+                        await sendAriseScrollV2RunTelemetry(
+                            baseOrigin,
+                            ariseToken,
+                            buildHeaders,
+                            item.meta,
+                            item.solvedRun,
+                            sessionState
+                        );
+                        const submitBody = JSON.stringify({ score: item.targetScore });
+                        await fetch(`${baseOrigin}/.proxy/api/leaderboards/${item.meta.boardId}/submit`, {
+                            method: "POST",
+                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(submitBody) }),
+                            body: submitBody,
+                            signal: AbortSignal.timeout(8000)
+                        }).catch(() => null);
+                    }
+                }
+            }
+
+            if (requests.length > 0) {
+                await Promise.allSettled(requests);
+            }
+        } catch {}
+        return resolutions;
+    })().finally(() => {
+        inFlightUnlocksByKey.delete(unlockKey);
+    });
+
+    inFlightUnlocksByKey.set(unlockKey, unlockTask);
+    return unlockTask;
 }
 
 export async function syncActivityMaxRecords(
@@ -897,10 +1013,20 @@ export async function syncActivityMaxRecords(
     );
 
     const levelScoresMap: Record<string, number> = {};
-    const solvedRunsList: Omit<SolvedShotScoreRun, "shotTtksMs" | "cumulativeMs">[] = [];
+    const solvedRunsList: Omit<
+        SolvedShotScoreRun,
+        "shotTtksMs" | "interKillGapsMs" | "cumulativeMs" | "shotDeltas" | "runningTotals"
+    >[] = [];
     for (const item of resolutions) {
         levelScoresMap[item.meta.aceTag] = item.solvedRun.total;
-        const { shotTtksMs: _s, cumulativeMs: _c, ...cleanRun } = item.solvedRun;
+        const {
+            shotTtksMs: _s,
+            interKillGapsMs: _g,
+            cumulativeMs: _c,
+            shotDeltas: _d,
+            runningTotals: _r,
+            ...cleanRun
+        } = item.solvedRun;
         solvedRunsList.push(cleanRun);
     }
     const bestOverallRun = solvedRunsList.reduce((best, cur) => (cur.total > best.total ? cur : best), solvedRunsList[0]);

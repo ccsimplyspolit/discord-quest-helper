@@ -1436,11 +1436,22 @@ export default definePlugin({
 
         const tick = () => {
             try {
-                // Defer to CompleteDiscordQuest if it is active to avoid duplicate postMessage/IPC sync loops
-                if ((window as any).Vencord?.Plugins?.plugins?.CompleteDiscordQuest?.started) return;
+                const winAny = window as any;
+                if (winAny.Vencord?.Plugins?.plugins?.CompleteDiscordQuest?.started) return;
 
-                const scoreMode = String((settings.store as any).activityScoreMode || "top1_plus_1") as any;
-                const customScore = Number((settings.store as any).activityCustomScore) || 24500;
+                const cdqStore = winAny.Vencord?.Settings?.plugins?.CompleteDiscordQuest;
+                const ownMode = (settings.store as any).activityScoreMode;
+                const ownCustom = Number((settings.store as any).activityCustomScore);
+                const cdqMode = cdqStore?.activityScoreMode;
+                const cdqCustom = Number(cdqStore?.activityCustomScore);
+
+                const scoreMode = String(
+                    winAny.__QUEST_SCORE_MODE__ ||
+                    (ownMode && ownMode !== "top1_plus_1" ? ownMode : (cdqMode || ownMode || "top1_plus_1"))
+                ) as any;
+                const customScore =
+                    Number(winAny.__QUEST_CUSTOM_SCORE__) ||
+                    (ownCustom && ownCustom !== 24500 ? ownCustom : (cdqCustom || ownCustom || 24500));
                 const currentScoreConfig = `${scoreMode}:${customScore}`;
                 if (lastSyncedScoreConfig && lastSyncedScoreConfig !== currentScoreConfig) {
                     postedCounts = new WeakMap<HTMLIFrameElement, number>();
@@ -1474,7 +1485,7 @@ export default definePlugin({
                                             ? Object.fromEntries(
                                                 Object.entries(CEILINGS).map(([k, ceil]) => [
                                                     k,
-                                                    Math.max(1000, Math.min(ceil - 1, Math.round(customScore)))
+                                                    Math.max(2000, Math.min(ceil - 1, Math.round(customScore)))
                                                 ])
                                             )
                                             : TOP2_PLUS_1_SCORES;

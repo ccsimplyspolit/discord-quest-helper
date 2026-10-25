@@ -685,23 +685,29 @@ if (quests.length === 0) {
 					const ARISE_TITLES = ["chronicle-ace", "crashies-ace", "f0rsaken-ace", "tenz-ace", "jawgemo-ace", "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"];
 					const ARISE_BADGES = ["Bronze", "Silver", "Gold"];
 					const ARISE_BOARDS = [
-						{ boardId: "ace-1", aceTag: "ace:01", playerName: "Chronicle", teamCode: "GMB", team: "ALPHA", ceiling: 25766, fallbackTop2: 24367 },
-						{ boardId: "ace-2", aceTag: "ace:02", playerName: "crashies", teamCode: "OPTC", team: "OMEGA", ceiling: 25766, fallbackTop2: 24378 },
-						{ boardId: "ace-3", aceTag: "ace:03", playerName: "f0rsakeN", teamCode: "PRX", team: "ALPHA", ceiling: 25766, fallbackTop2: 24544 },
-						{ boardId: "ace-4", aceTag: "ace:04", playerName: "TenZ", teamCode: "SEN", team: "OMEGA", ceiling: 25766, fallbackTop2: 24539 },
-						{ boardId: "ace-5", aceTag: "ace:05", playerName: "jawgemo", teamCode: "EG", team: "ALPHA", ceiling: 25766, fallbackTop2: 24456 },
-						{ boardId: "ace-6", aceTag: "ace:08", playerName: "bstrdd", teamCode: "MIBR", team: "OMEGA", ceiling: 25766, fallbackTop2: 23343 },
-						{ boardId: "ace-7", aceTag: "ace:06", playerName: "Aspas", teamCode: "MIBR", team: "ALPHA", ceiling: 25137, fallbackTop2: 23629 },
-						{ boardId: "ace-8", aceTag: "ace:07", playerName: "jinggg", teamCode: "PRX", team: "OMEGA", ceiling: 25137, fallbackTop2: 23837 },
-						{ boardId: "ace-9", aceTag: "ace:09", playerName: "KangKang", teamCode: "EDG", team: "ALPHA", ceiling: 25766, fallbackTop2: 23057 },
-						{ boardId: "ace-10", aceTag: "ace:10", playerName: "Jamppi", teamCode: "VIT", team: "OMEGA", ceiling: 23748, fallbackTop2: 22422 }
+						{ boardId: "ace-1", aceTag: "ace:01", playerName: "Chronicle", teamCode: "GMB", team: "ALPHA", ceiling: 25766, fallbackTop2: 24367, legitProScore: 22340 },
+						{ boardId: "ace-2", aceTag: "ace:02", playerName: "crashies", teamCode: "OPTC", team: "OMEGA", ceiling: 25766, fallbackTop2: 24378, legitProScore: 22185 },
+						{ boardId: "ace-3", aceTag: "ace:03", playerName: "f0rsakeN", teamCode: "PRX", team: "ALPHA", ceiling: 25766, fallbackTop2: 24544, legitProScore: 22410 },
+						{ boardId: "ace-4", aceTag: "ace:04", playerName: "TenZ", teamCode: "SEN", team: "OMEGA", ceiling: 25766, fallbackTop2: 24539, legitProScore: 22290 },
+						{ boardId: "ace-5", aceTag: "ace:05", playerName: "jawgemo", teamCode: "EG", team: "ALPHA", ceiling: 25766, fallbackTop2: 24456, legitProScore: 22120 },
+						{ boardId: "ace-6", aceTag: "ace:08", playerName: "bstrdd", teamCode: "MIBR", team: "OMEGA", ceiling: 25766, fallbackTop2: 23343, legitProScore: 21980 },
+						{ boardId: "ace-7", aceTag: "ace:06", playerName: "Aspas", teamCode: "MIBR", team: "ALPHA", ceiling: 25137, fallbackTop2: 23629, legitProScore: 22050 },
+						{ boardId: "ace-8", aceTag: "ace:07", playerName: "jinggg", teamCode: "PRX", team: "OMEGA", ceiling: 25137, fallbackTop2: 23837, legitProScore: 22160 },
+						{ boardId: "ace-9", aceTag: "ace:09", playerName: "KangKang", teamCode: "EDG", team: "ALPHA", ceiling: 25766, fallbackTop2: 23057, legitProScore: 21910 },
+						{ boardId: "ace-10", aceTag: "ace:10", playerName: "Jamppi", teamCode: "VIT", team: "OMEGA", ceiling: 23748, fallbackTop2: 22422, legitProScore: 21840 }
 					];
-					const ARISE_SCORES = Object.fromEntries(ARISE_BOARDS.map(b => [b.boardId, b.fallbackTop2 + 1]));
+					const getScoreConfig = () => {
+						const cdqStore = window.Vencord?.Settings?.plugins?.CompleteDiscordQuest;
+						const sgStore = window.Vencord?.Settings?.plugins?.DiscordStealthGuard;
+						const scoreMode = String(window.__QUEST_SCORE_MODE__ || cdqStore?.activityScoreMode || sgStore?.activityScoreMode || "top1_plus_1");
+						const customScore = Number(window.__QUEST_CUSTOM_SCORE__ || cdqStore?.activityCustomScore || sgStore?.activityCustomScore) || 24500;
+						return { scoreMode, customScore };
+					};
 
 					const solveShotScoreRun = (targetScore, meta) => {
-						const T = Math.max(2000, Math.min(meta.ceiling, Math.round(Number(targetScore) || (meta.fallbackTop2 + 1))));
+						const T = Math.max(2000, Math.min(meta.ceiling - 1, Math.round(Number(targetScore) || (meta.fallbackTop2 + 1))));
 						const maxMatchScore = Math.round(meta.ceiling / 5.2);
-						let chosenS = maxMatchScore, chosenTotalTtkMs = 3500;
+						let chosenS = maxMatchScore, chosenTotalTtkMs = 3500, chosenTtkMult = 2.6;
 						const tryS = (s, minTtk, maxTtk, mult5) => {
 							const reqMult = T / (2.0 * s);
 							if (reqMult < 0.999 || reqMult > 2.601) return false;
@@ -719,6 +725,7 @@ if (quests.length === 0) {
 								if (Math.round(s * actualMult * 2.0) === T) {
 									chosenS = s;
 									chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
+									chosenTtkMult = Number(actualMult.toFixed(4));
 									return true;
 								}
 							}
@@ -735,14 +742,25 @@ if (quests.length === 0) {
 						const remBase = Math.floor(remMs / 4);
 						const otherFour = [-34, -11, 14, 31].map(off => Math.max(bestTtkMs + 10, remBase + off));
 						otherFour[3] += remMs - otherFour.reduce((a, b) => a + b, 0);
+						if (otherFour[3] < bestTtkMs) {
+							const deficit = bestTtkMs - otherFour[3];
+							otherFour[3] = bestTtkMs;
+							otherFour[2] = Math.max(bestTtkMs, otherFour[2] - deficit);
+						}
 						const shotTtksMs = [bestTtkMs, ...otherFour].sort((a, b) => a - b);
-						let cursorMs = 1150;
 						const gaps = [0, 1420, 1680, 1340, 1590];
-						const cumulativeMs = shotTtksMs.map((ms, k) => (cursorMs += gaps[k] + ms));
-						return { total: T, matchScore: chosenS, meanTtk, bestTtk, shotTtksMs, cumulativeMs };
+						const baseKillsTotal = Math.max(500, chosenS - 550);
+						const basePerKill = Math.floor(baseKillsTotal / 5);
+						const shotDeltas = [-12, -5, 0, 6, 11].map(off => Math.max(80, basePerKill + off));
+						shotDeltas[4] += baseKillsTotal - shotDeltas.reduce((a, b) => a + b, 0);
+						let runningAcc = 0;
+						const runningTotals = shotDeltas.map(d => (runningAcc += d));
+						const actualTotal = Math.round(chosenS * chosenTtkMult * 2.0);
+						return { total: actualTotal, matchScore: chosenS, meanTtk, bestTtk, team: meta.team.toLowerCase(), shotTtksMs, gaps, shotDeltas, runningTotals };
 					};
 
 					const broadcastActivityCompletion = () => {
+						const { scoreMode, customScore } = getScoreConfig();
 						const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
 						const hasNativeSync = typeof nativeHelper?.syncActivityMaxRecords === "function";
 						let count = 0;
@@ -752,8 +770,15 @@ if (quests.length === 0) {
 								try {
 									for (const titleId of ARISE_TITLES) iframe.contentWindow?.postMessage({ type: "award-title", payload: titleId }, "*");
 									for (const rank of ARISE_BADGES) iframe.contentWindow?.postMessage({ type: "award-badge", payload: rank }, "*");
-									if (!hasNativeSync) {
-										for (const [leaderboardId, score] of Object.entries(ARISE_SCORES)) iframe.contentWindow?.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+									if (!hasNativeSync && scoreMode !== "quest_only") {
+										for (const meta of ARISE_BOARDS) {
+											const score = scoreMode === "legit_pro"
+												? meta.legitProScore
+												: scoreMode === "custom"
+													? Math.max(2000, Math.min(meta.ceiling - 1, Math.round(customScore)))
+													: meta.fallbackTop2 + 1;
+											iframe.contentWindow?.postMessage({ type: "submit-score", payload: { leaderboardId: meta.boardId, score } }, "*");
+										}
 									}
 									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
 									count++;
@@ -761,7 +786,7 @@ if (quests.length === 0) {
 							}
 						}
 						try {
-							nativeHelper?.syncActivityMaxRecords?.(String(applicationId || "1536318183873454090"))?.catch?.(() => null);
+							nativeHelper?.syncActivityMaxRecords?.(String(applicationId || "1536318183873454090"), scoreMode, customScore)?.catch?.(() => null);
 						} catch {}
 						return count;
 					};
@@ -777,6 +802,7 @@ if (quests.length === 0) {
 
 						// Try headless OAuth2 code exchange + Activity backend API (via native Electron helper or renderer fetch)
 						try {
+							const { scoreMode, customScore } = getScoreConfig();
 							const oauthRes = await httpWithAnalytics.post({
 								url: "/oauth2/authorize",
 								query: { client_id: String(applicationId), response_type: "code", scope: "identify", prompt: "none", state: "" },
@@ -788,7 +814,7 @@ if (quests.length === 0) {
 								const oauthCode = decodeURIComponent(codeMatch[1]);
 								const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
 								if (typeof nativeHelper?.completeActivityQuest === "function") {
-									const nativeResult = await nativeHelper.completeActivityQuest(String(applicationId), String(quest.id), oauthCode, secondsNeeded).catch(() => null);
+									const nativeResult = await nativeHelper.completeActivityQuest(String(applicationId), String(quest.id), oauthCode, secondsNeeded, scoreMode, customScore).catch(() => null);
 									if (nativeResult?.ok) {
 										console.log("Quest completed via Activity backend API!");
 										doJob();
@@ -833,13 +859,17 @@ if (quests.length === 0) {
 											myUserId = JSON.parse(atob(b64))?.sub || "";
 										} catch {}
 										const sessionId = crypto.randomUUID(), deviceId = crypto.randomUUID();
-										let sessionDuration = 48000 + Math.floor(Math.random() * 24000);
-										const sendScrollV2 = async (eventType, strings, numbers) => {
-											sessionDuration += 1400 + Math.floor(Math.random() * 1900);
+										const initialDurationMs = 42000 + Math.floor(Math.random() * 18000);
+										const sessionStartMs = Date.now() - initialDurationMs;
+										let sessionDuration = initialDurationMs;
+										let completedAceCount = 0;
+										let storedBestTotal = 0;
+										const sendScrollV2 = async (eventType, strings, numbers, deltaMs, isExternal = true) => {
+											sessionDuration += Math.max(1, Math.round(deltaMs));
 											const body = JSON.stringify({
 												sessionId, deviceId, eventType, userId: myUserId || undefined, universeId,
-												deviceType: "desktop", timestamp: Date.now(), sessionDuration, platform: "discord",
-												metadata: { strings, numbers }, appVersion, isExternal: true
+												deviceType: "desktop", timestamp: sessionStartMs + sessionDuration, sessionDuration, platform: "discord",
+												metadata: { strings, numbers }, appVersion, isExternal
 											});
 											await fetch(`${baseOrigin}/.proxy/api/scrollv2`, {
 												method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body
@@ -856,37 +886,57 @@ if (quests.length === 0) {
 											}),
 											fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }) })
 										]);
-										for (const meta of ARISE_BOARDS) {
-											let otherTop = meta.fallbackTop2, myScore = null, myPos = null;
-											try {
-												const lbRes = await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}`, {
-													method: "GET", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
-												}).catch(() => null);
-												if (lbRes?.ok) {
-													const lbData = await lbRes.json().catch(() => null);
-													const me = lbData?.me;
-													if (typeof me?.score === "number") myScore = me.score;
-													if (typeof me?.position === "number") myPos = me.position;
-													const cands = [];
-													for (const arr of [lbData?.topN, me?.surrounding?.above, me?.surrounding?.below]) {
-														if (Array.isArray(arr)) for (const e of arr) {
-															if (typeof e?.score === "number" && e.userId !== myUserId && e.userId !== me?.userId) cands.push(e.score);
+										if (scoreMode !== "quest_only") {
+											for (const meta of ARISE_BOARDS) {
+												let otherTop = meta.fallbackTop2, myScore = null, myPos = null;
+												try {
+													const lbRes = await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}`, {
+														method: "GET", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
+													}).catch(() => null);
+													if (lbRes?.ok) {
+														const lbData = await lbRes.json().catch(() => null);
+														const me = lbData?.me;
+														if (typeof me?.score === "number") myScore = me.score;
+														if (typeof me?.position === "number") myPos = me.position;
+														const cands = [];
+														for (const arr of [lbData?.topN, me?.surrounding?.above, me?.surrounding?.below]) {
+															if (Array.isArray(arr)) for (const e of arr) {
+																if (typeof e?.score === "number" && e.userId !== myUserId && e.userId !== me?.userId) cands.push(e.score);
+															}
 														}
+														if (cands.length > 0) otherTop = Math.max(...cands);
 													}
-													if (cands.length > 0) otherTop = Math.max(...cands);
+												} catch {}
+												const desiredScore = scoreMode === "custom"
+													? Math.max(2000, Math.min(meta.ceiling - 1, Math.round(customScore)))
+													: scoreMode === "legit_pro"
+														? meta.legitProScore
+														: Math.max(2000, Math.min(meta.ceiling - 50, otherTop + 1));
+												const run = solveShotScoreRun(desiredScore, meta);
+												const targetScore = run.total;
+												if (scoreMode === "top1_plus_1") {
+													if (myPos === 1 && myScore !== null && myScore > otherTop) continue;
+													if (myScore !== null && myScore > otherTop) continue;
+												} else if (myScore !== null && myScore >= targetScore) {
+													continue;
 												}
-											} catch {}
-											const targetScore = Math.max(1000, Math.min(meta.ceiling - 50, otherTop + 1));
-											if (myPos === 1 && myScore !== null && myScore > otherTop) continue;
-											if (myScore !== null && myScore > otherTop) continue;
-											const run = solveShotScoreRun(targetScore, meta);
-											await sendScrollV2("play_player", [meta.playerName, meta.teamCode, meta.aceTag], []);
-											for (let i = 0; i < 5; i++) await sendScrollV2("shot_taken", ["headshot"], [run.shotTtksMs[i], run.cumulativeMs[i]]);
-											await sendScrollV2("completed", [meta.aceTag, meta.team.toLowerCase()], [run.total, 1, run.total, 100, run.meanTtk, run.bestTtk, 0]);
-											const submitBody = JSON.stringify({ score: targetScore });
-											await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}/submit`, {
-												method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(submitBody) }), body: submitBody
-											}).catch(() => null);
+												const selDelta = 1150 + Math.floor(Math.random() * 650);
+												await sendScrollV2("checkpoint", ["select_player"], [sessionDuration + selDelta, 3], selDelta, false);
+												await sendScrollV2("play_player", [meta.playerName, meta.teamCode, meta.aceTag], [], 2 + Math.floor(Math.random() * 3), true);
+												const btnDelta = 1650 + Math.floor(Math.random() * 550);
+												await sendScrollV2("checkpoint", ["play_button_2"], [sessionDuration + btnDelta, 4], btnDelta, false);
+												for (let i = 0; i < 5; i++) {
+													const shotDeltaMs = (i === 0 ? 1150 : run.gaps[i]) + run.shotTtksMs[i];
+													await sendScrollV2("shot_taken", ["headshot"], [run.shotDeltas[i], run.runningTotals[i]], shotDeltaMs, true);
+												}
+												completedAceCount = Math.min(10, completedAceCount + 1);
+												storedBestTotal = Math.max(storedBestTotal, run.total);
+												await sendScrollV2("completed", [meta.aceTag, run.team], [run.total, completedAceCount, storedBestTotal, 100, run.meanTtk, run.bestTtk, 0], 280 + Math.floor(Math.random() * 140), true);
+												const submitBody = JSON.stringify({ score: targetScore });
+												await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}/submit`, {
+													method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(submitBody) }), body: submitBody
+												}).catch(() => null);
+											}
 										}
 										const progRes = await fetch(`${baseOrigin}/.proxy/acf/quest/progress`, {
 											method: "POST",
