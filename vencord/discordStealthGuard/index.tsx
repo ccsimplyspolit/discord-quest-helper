@@ -1030,7 +1030,7 @@ export default definePlugin({
         const quest = QuestStore?.getQuest?.(questId) ?? QuestStore?.quests?.get?.(questId);
         const tasks = quest?.config?.taskConfigV2?.tasks ?? quest?.config?.taskConfig?.tasks ?? {};
         const isPlayOnDesktop = Boolean(tasks.PLAY_ON_DESKTOP);
-        const isPlayActivityOnly = (Boolean(tasks.PLAY_ACTIVITY) || Boolean(tasks.ACHIEVEMENT_IN_ACTIVITY)) && !tasks.PLAY_ON_DESKTOP;
+        const isPlayActivityOnly = (Boolean(tasks.PLAY_ACTIVITY) || Boolean(tasks.ACHIEVEMENT_IN_ACTIVITY) || Boolean(tasks.ACHIEVEMENT_IN_GAME)) && !tasks.PLAY_ON_DESKTOP;
         const appId = bodyAppId || quest?.config?.application?.id;
         const appName = quest?.config?.application?.name || quest?.config?.messages?.gameTitle || "Game";
 

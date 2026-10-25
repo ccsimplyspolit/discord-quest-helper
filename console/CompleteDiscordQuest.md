@@ -617,39 +617,240 @@ if (quests.length === 0) {
 
 			let fn = async () => {
 				console.log("Completing quest", questName, "-", quest.config.messages.questName);
-
-				while (true) {
-					const body = { stream_key: streamKey, terminal: false };
-					if (applicationId) body.application_id = applicationId;
-					let res;
-					try {
-						res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body });
-					} catch (hbErr) {
-						if (hbErr?.status === 429) {
-							const retryMs = ((hbErr?.body?.retry_after || 10) * 1000) + 500;
-							await new Promise(resolve => setTimeout(resolve, retryMs));
-							continue;
+				const origEnrolledAt = new Map();
+				let autoLaunchedFrameId = null;
+				try {
+					if (isAchievementTask && QuestsStore?.quests) {
+						// Deprioritize already-completed sibling quests sharing the same applicationId so Discord's GET_QUEST RPC returns the active uncompleted quest
+						for (const q of QuestsStore.quests.values()) {
+							if (!q || q.id === quest.id) continue;
+							if (q.userStatus?.completedAt != null && typeof q.userStatus?.enrolledAt === "string") {
+								origEnrolledAt.set(q.userStatus, q.userStatus.enrolledAt);
+								q.userStatus.enrolledAt = "2099-01-01T00:00:00.000Z";
+							}
 						}
-						if (isAchievementTask && hbErr?.status >= 400 && hbErr?.status < 500) {
-							console.log(`Quest ${questName} (${taskName}) enrolled; awaiting server-side activity achievement event.`);
+					}
+
+					const buildAriseRequestId = bodyStr => {
+						const mask64 = (1n << 64n) - 1n;
+						const bitPositions = [];
+						for (let b = 127; b >= 0; b--) {
+							if (b !== 79 && b !== 78 && b !== 77 && b !== 76 && b !== 63 && b !== 62) {
+								bitPositions.push(BigInt(b));
+							}
+						}
+						const randBits = bits => {
+							let v = 0n;
+							const bytes = crypto.getRandomValues(new Uint8Array(Math.ceil(bits / 8)));
+							for (const byte of bytes) v = (v << 8n) | BigInt(byte);
+							return v & ((1n << BigInt(bits)) - 1n);
+						};
+						const nonce58 = randBits(58);
+						let tag64;
+						if (bodyStr === undefined) {
+							tag64 = randBits(64);
+						} else {
+							let fnv = 0xcbf29ce484222325n;
+							for (const byte of new TextEncoder().encode(bodyStr)) {
+								fnv = ((fnv ^ BigInt(byte)) * 1099511628211n) & mask64;
+							}
+							let sm = (0x6c1fd93a84b7250en ^ ((nonce58 + 0x9e3779b97f4a7c15n) & mask64)) & mask64;
+							sm = ((sm ^ (sm >> 30n)) * 0xbf58476d1ce4e5b9n) & mask64;
+							sm = ((sm ^ (sm >> 27n)) * 0x94d049bb133111ebn) & mask64;
+							sm = (sm ^ (sm >> 31n)) & mask64;
+							tag64 = (fnv ^ sm) & mask64;
+						}
+						const combined122 = (nonce58 << 64n) | tag64;
+						let uuidInt = (4n << 76n) | (2n << 62n);
+						for (let i = 0; i < 122; i++) {
+							uuidInt |= ((combined122 >> BigInt(121 - i)) & 1n) << bitPositions[i];
+						}
+						const hex = uuidInt.toString(16).padStart(32, "0");
+						return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+					};
+
+					const acknowledgeActivityDisclosures = async appId => {
+						try {
+							const discRes = await httpWithAnalytics.get({ url: `/applications/${appId}/disclosures` }).catch(() => null);
+							const disclosures = discRes?.body?.disclosures;
+							if (Array.isArray(disclosures) && disclosures.length > 0 && !discRes?.body?.all_acked) {
+								await httpWithAnalytics.post({
+									url: `/applications/${appId}/disclosures`,
+									body: { disclosures }
+								}).catch(() => null);
+							}
+						} catch {}
+					};
+
+					const broadcastActivityCompletion = () => {
+						let count = 0;
+						for (const iframe of document.querySelectorAll("iframe")) {
+							const src = String(iframe?.src || "");
+							if (src.includes("discordsays.com") && (!applicationId || src.includes(String(applicationId)))) {
+								try {
+									iframe.contentWindow?.postMessage({ type: "award-title", payload: "f0rsaken-ace" }, "*");
+									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
+									count++;
+								} catch {}
+							}
+						}
+						return count;
+					};
+
+					if (isAchievementTask && applicationId) {
+						try {
+							FluxDispatcher.dispatch({ type: "QUEST_APPLICATION_START_TIMER", questId: quest.id });
+							await acknowledgeActivityDisclosures(applicationId);
+							await httpWithAnalytics.post({ url: `/applications/${applicationId}/proxy-ticket`, body: {} }).catch(() => null);
+						} catch {}
+
+						broadcastActivityCompletion();
+
+						// Try headless OAuth2 code exchange + Activity backend API (via native Electron helper or renderer fetch)
+						try {
+							const oauthRes = await httpWithAnalytics.post({
+								url: "/oauth2/authorize",
+								query: { client_id: String(applicationId), response_type: "code", scope: "identify", prompt: "none", state: "" },
+								body: { permissions: "0", authorize: true, integration_type: 1, location_context: { guild_id: "10000", channel_id: "10000", channel_type: 10000 } }
+							}).catch(() => null);
+							const loc = oauthRes?.body?.location || "";
+							const codeMatch = loc.match(/[?&]code=([^&#]+)/);
+							if (codeMatch?.[1]) {
+								const oauthCode = decodeURIComponent(codeMatch[1]);
+								const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
+								if (typeof nativeHelper?.completeActivityQuest === "function") {
+									const nativeResult = await nativeHelper.completeActivityQuest(String(applicationId), String(quest.id), oauthCode, secondsNeeded).catch(() => null);
+									if (nativeResult?.ok) {
+										console.log("Quest completed via Activity backend API!");
+										doJob();
+										return;
+									}
+								}
+
+								const baseOrigin = `https://${applicationId}.discordsays.com`;
+								const buildHeaders = (token = "", extra = {}) => ({
+									"Content-Type": "application/json",
+									"Accept": "*/*",
+									"X-Auth-Token": token,
+									"X-Universe-ID": "78a74ba6-b027-4b0e-a686-9a6f4124c068",
+									"X-Discord-Activity-Id": String(applicationId),
+									"X-Discord-Hostname": `${applicationId}.discordsays.com`,
+									"X-Arise-Client": "spades-prod-main-4835c58",
+									...extra
+								});
+								const authRes = await fetch(`${baseOrigin}/.proxy/acf/authorize`, {
+									method: "POST",
+									headers: buildHeaders(""),
+									body: JSON.stringify({ code: oauthCode, activityId: String(applicationId) })
+								}).catch(() => null);
+								if (authRes?.ok) {
+									const authData = await authRes.json().catch(() => null);
+									const acfToken = authData?.token || authData?.authToken || "";
+									if (acfToken) {
+										let ariseToken = acfToken;
+										const regRes = await fetch(`${baseOrigin}/.proxy/acf/arise/register`, {
+											method: "POST",
+											headers: buildHeaders(acfToken)
+										}).catch(() => null);
+										if (regRes?.ok) {
+											const regData = await regRes.json().catch(() => null);
+											if (regData?.authToken) ariseToken = regData.authToken;
+										}
+										const titleBody = JSON.stringify({ id: "f0rsaken-ace" });
+										await fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
+											method: "POST",
+											headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(titleBody) }),
+											body: titleBody
+										}).catch(() => null);
+										await fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
+											method: "POST",
+											headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
+										}).catch(() => null);
+										const progRes = await fetch(`${baseOrigin}/.proxy/acf/quest/progress`, {
+											method: "POST",
+											headers: buildHeaders(acfToken),
+											body: JSON.stringify({ progress: Math.max(1, Number(secondsNeeded) || 1), quest_id: String(quest.id) })
+										}).catch(() => null);
+										if (progRes?.ok) {
+											console.log("Quest completed via Activity backend API!");
+											doJob();
+											return;
+										}
+									}
+								}
+							}
+						} catch {}
+
+						// Ensure Activity Frame is mounted (auto-launch in minimized PIP mode if not open) and drive via postMessage bridge
+						if (broadcastActivityCompletion() === 0) {
+							try {
+								await acknowledgeActivityDisclosures(applicationId);
+								const FrameMgr = Object.values(wpRequire.c).find(x => x?.exports?.A?.launchFrame && x?.exports?.A?.updateFrameLayoutMode)?.exports?.A
+									?? Object.values(wpRequire.c).find(x => x?.exports?.launchFrame && x?.exports?.updateFrameLayoutMode)?.exports;
+								if (typeof FrameMgr?.launchFrame === "function") {
+									const launchedId = await FrameMgr.launchFrame({ applicationId: String(applicationId), surface: { type: 0 }, showErrorModal: false });
+									autoLaunchedFrameId = typeof launchedId === "string" ? launchedId : `main:${applicationId}`;
+									FrameMgr.updateFrameLayoutMode?.({ frameId: autoLaunchedFrameId, layoutMode: 1 });
+								}
+							} catch {}
+						}
+
+						for (let cycle = 0; cycle < 12; cycle++) {
+							await new Promise(resolve => setTimeout(resolve, 6500));
+							broadcastActivityCompletion();
+							const curQ = QuestsStore?.getQuest?.(quest.id);
+							const curProg = curQ?.userStatus?.progress?.[taskName]?.value ?? 0;
+							if (curQ?.userStatus?.completedAt != null || curProg >= secondsNeeded) {
+								console.log("Quest completed!");
+								doJob();
+								return;
+							}
+						}
+					}
+
+					while (true) {
+						if (isAchievementTask) broadcastActivityCompletion();
+						const body = { stream_key: streamKey, terminal: false };
+						if (applicationId) body.application_id = applicationId;
+						let res;
+						try {
+							res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body });
+						} catch (hbErr) {
+							if (hbErr?.status === 429) {
+								const retryMs = ((hbErr?.body?.retry_after || 10) * 1000) + 500;
+								await new Promise(resolve => setTimeout(resolve, retryMs));
+								continue;
+							}
+							if (isAchievementTask && hbErr?.status >= 400 && hbErr?.status < 500) {
+								console.log(`Quest ${questName} (${taskName}) enrolled; awaiting server-side activity achievement event.`);
+								break;
+							}
+							throw hbErr;
+						}
+						const progress = res?.body?.progress?.[taskName]?.value ?? res?.body?.progress?.PLAY_ACTIVITY?.value ?? res?.body?.progress?.ACHIEVEMENT_IN_ACTIVITY?.value ?? res?.body?.progress?.ACHIEVEMENT_IN_GAME?.value ?? 0;
+						console.log(`Quest progress: ${progress}/${secondsNeeded}`);
+
+						if (progress >= secondsNeeded || res?.body?.completed_at != null) {
+							const termBody = { stream_key: streamKey, terminal: true };
+							if (applicationId) termBody.application_id = applicationId;
+							try {
+								await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body: termBody });
+							} catch {}
+							console.log("Quest completed!");
 							break;
 						}
-						throw hbErr;
-					}
-					const progress = res?.body?.progress?.[taskName]?.value ?? res?.body?.progress?.PLAY_ACTIVITY?.value ?? res?.body?.progress?.ACHIEVEMENT_IN_ACTIVITY?.value ?? res?.body?.progress?.ACHIEVEMENT_IN_GAME?.value ?? 0;
-					console.log(`Quest progress: ${progress}/${secondsNeeded}`);
 
-					if (progress >= secondsNeeded || res?.body?.completed_at != null) {
-						const termBody = { stream_key: streamKey, terminal: true };
-						if (applicationId) termBody.application_id = applicationId;
+						await new Promise(resolve => setTimeout(resolve, (20 * 1000) + Math.floor(Math.random() * 1500)));
+					}
+				} finally {
+					if (autoLaunchedFrameId && applicationId) {
 						try {
-							await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body: termBody });
+							FluxDispatcher.dispatch({ type: "FRAME_STOP", applicationId: String(applicationId), frameId: autoLaunchedFrameId });
 						} catch {}
-						console.log("Quest completed!");
-						break;
 					}
-
-					await new Promise(resolve => setTimeout(resolve, (20 * 1000) + Math.floor(Math.random() * 1500)));
+					for (const [statusObj, val] of origEnrolledAt.entries()) {
+						try { statusObj.enrolledAt = val; } catch {}
+					}
 				}
 
 				doJob();
