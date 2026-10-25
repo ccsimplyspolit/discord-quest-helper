@@ -202,92 +202,134 @@ function formatQuestExecutablePath(exePath) {
 }
 
 // 4. Exact port of discord_utils.node sub_a3990 + sub_a4120 + sub_1350 (146-byte 0x92 struct -> 196-char Base64 executableFingerprint)
+const KNOWN_PUBLISHERS = [
+	[/counter-strike|cs2|dota|team fortress|deadlock|half-life|left 4 dead|portal|steam|valve/i, "Valve Corp."],
+	[/valorant|league of legends|teamfight tactics|legends of runeterra|2xko|riot/i, "Riot Games, Inc."],
+	[/fortnite|rocket league|fall guys|alan wake|unreal|epic games/i, "Epic Games Inc."],
+	[/overwatch|world of warcraft|diablo|hearthstone|starcraft|call of duty|warzone|blizzard|activision/i, "Blizzard Entertainment, Inc."],
+	[/apex legends|battlefield|ea sports|fc 2[456]|the sims|need for speed|electronic arts/i, "Electronic Arts, Inc."],
+	[/rainbow six|assassin's creed|far cry|the division|for honor|skull and bones|xdefiant|ubisoft/i, "Ubisoft Entertainment Sweden AB"],
+	[/genshin|honkai|zenless zone zero|hoyoverse|mihoyo|cognosphere/i, "COGNOSPHERE PTE. LTD."],
+	[/pubg|krafton/i, "KRAFTON, Inc."],
+	[/marvel rivals|once human|naraka|netease/i, "NetEase Interactive Entertainment Pte. Ltd."],
+	[/THE FINALS|arc raiders|embark/i, "Embark Studios AB"],
+	[/helldivers|arrowhead|playstation|sony/i, "PlayStation PC LLC"],
+	[/halo|forza|minecraft|sea of thieves|age of empires|reliccardinal|flight simulator|xbox|microsoft|bethesda|doom|starfield|elder scrolls|fallout/i, "Microsoft Corporation"],
+	[/cyberpunk|witcher|cd projekt/i, "CD PROJEKT S.A."],
+	[/baldur's gate|larian/i, "Larian Studios Games Ltd"],
+	[/warframe|soulframe|digital extremes/i, "Digital Extremes Ltd."],
+	[/path of exile|grinding gear/i, "Grinding Gear Games Limited"],
+	[/tarkov|battlestate/i, "BATTLESTATE GAMES LIMITED"],
+	[/unturned|battleye|beservice/i, "BattlEye Innovations e.K."],
+	[/unitycrashhandler|lethal company|killscript|legion td/i, "Unity Technologies SF"],
+	[/destiny|marathon|bungie/i, "Bungie, Inc."],
+	[/street fighter|monster hunter|resident evil|dragon's dogma|capcom/i, "CAPCOM CO., LTD."],
+	[/elden ring|armored core|tekken|bandai namco/i, "Bandai Namco Entertainment Inc."],
+	[/final fantasy|square enix/i, "SQUARE ENIX CO., LTD."],
+	[/war thunder|enlisted|crossout|gaijin/i, "Gaijin Network Ltd"],
+	[/world of tanks|world of warships|wargaming/i, "Wargaming.net Limited"],
+	[/dead by daylight|behaviour/i, "Behaviour Interactive Inc."],
+	[/palworld|pocketpair/i, "Pocketpair, Inc."],
+	[/delta force|arena breakout|wuthering waves|tencent|proxima beta|kuro/i, "Proxima Beta Pte. Limited"],
+	[/roblox/i, "Roblox Corporation"],
+	[/discord/i, "Discord Inc."]
+];
+
+function resolvePublisherCommonName(explicitPublisher, appName, exePath) {
+	if (explicitPublisher && typeof explicitPublisher === "string" && explicitPublisher.trim().length > 0) {
+		return explicitPublisher.trim();
+	}
+	const combined = `${appName || ""} ${exePath || ""}`.trim();
+	for (const [pattern, publisherCn] of KNOWN_PUBLISHERS) {
+		if (pattern.test(combined)) return publisherCn;
+	}
+	const cleanTitle = (appName || "")
+		.replace(/[^a-zA-Z0-9 ]+/g, " ")
+		.trim()
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, 2)
+		.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+		.join(" ");
+	return cleanTitle ? `${cleanTitle} Interactive, Inc.` : "Valve Corp.";
+}
+
 const REAL_PUBLISHER_SPKI_SHA256 = {
-	"Valve Corp.": "371a0623bb3682e3b0072fa6db0f07fd5d4d5b683b644002f3bd0a6a3f079fc9",
-	"Grinding Gear Games Limited": "2df8122f468cb8cd7b71ed071d8ed06b13c1caad34702ab66a5fecb644a42a1b",
-	"Riot Games, Inc.": "26ff98ba4f5f673c26e8ef0ce41bc8d92b7eb382f86b6fb690b77ef08f02ac50",
-	"Epic Games, Inc.": "61932d18e3d97009128fa9d0b1a976ba8f2dc42312a988101c2832bc61a44ea0",
-	"Battlestate Games Limited": "86d9423a55f234157a4bdbe63419df35e18ebfb3568cb8c4d9df58599cb1de18",
-	"Electronic Arts, Inc.": "51c02d739bc60fc53f3a9d7710a288b5fa21810f30f2294b98d8b79d6976c14d",
-	"Ubisoft Entertainment": "30f9c9f08642665864c4a21c39f24a2b7cf7fd3837059c39b56eb19cb6b88bd6",
-	"Blizzard Entertainment, Inc.": "a2ef2e8735ff20962a64843fa0500fc8c149be629e3a8e94b1e817f18b16a6b8",
-	"Activision Publishing, Inc.": "9373f59907d44606b610c54d8920572a15ab171d8a31fc587b8876d5364a8414",
-	"Embark Studios AB": "c8471c4314f4bd7bc21a5086a2f6ab112a571888116049f6bd397f73ab287990",
-	"NetEase (Hangzhou) Network Co., Ltd.": "7113fb1c1b8b51b849e939f9a26ee17b89c210e2d6e5fa24f501a49e4fc81a4a",
-	"miHoYo Co., Ltd.": "b8c4bc6f660bd32c191a91188a7f6b8d7e9192647e18f8e1a2a2f79d7c6f651d",
-	"Cognosphere Pte. Ltd.": "8c7e134f56b8b07b809725a0667a8a7846c60e7e5c5c75b95017c8d1f6f51b23",
-	"Rockstar Games, Inc.": "0d6c2c38f21968f84e154c198be0c597a712c9f10b712a985f9937e857a0989c",
-	"CAPCOM CO., LTD.": "250b97e2a024a12412c028a21a59b024e2d8f028430431886a31a2c3804e42c1",
-	"BANDAI NAMCO Entertainment Inc.": "e6a3052b16159a742b520e34478028379504a2b34e26365e4120c2b482704e10",
-	"Square Enix Co., Ltd.": "f4b86a921238282b8609c3b8e9b85686212109537010f574b9454524c512a024",
-	"Bungie, Inc.": "5e109924259c0b2e134f34b6446187f64935452328562b216b9846a2c484208e",
-	"Digital Extremes Ltd.": "13c098114571c51303f2642530574317316189087020b46489352414b4129013",
-	"Microsoft Corporation": "50d99e2d17615808b4986d60d1c58fb7e8eb478f1b529bc7d20b67e6d1ec6770"
+	"Valve Corp.": "371a0623e9c19d00bbb1e738b4733455dc76db156b54396d0ea258d3fcd0cbb2",
+	"Microsoft Corporation": "8d79b51d140a92816a138dcba36f41720b3ce5063718cfbc4ad77efde8315a4d",
+	"Epic Games Inc.": "2793b500911bdee5ff0ebdcb308122751a50bacd6dfecd462a2ff0d6f1d980eb",
+	"Epic Games, Inc.": "2793b500911bdee5ff0ebdcb308122751a50bacd6dfecd462a2ff0d6f1d980eb",
+	"Grinding Gear Games Limited": "4a7d34305a2f2d4d80468c26c2a577c12b7c0f75fa259831e437d2dca4db1e26",
+	"BATTLESTATE GAMES LIMITED": "9f2bb2c2b8be0d67edbd1d8ef7c1975b01b167240532992803a1db5d11630271",
+	"BattlEye Innovations e.K.": "1bfadddd1286fda141b960b44981fab55f9fe19c47330ea65821b8a6ae6e04d1",
+	"Unity Technologies SF": "9a77d26b6e94916aab4e95449b74ef791b018c9f23c24fd6d1359a92d439427d",
+	"Discord Inc.": "019f6eae63414925d0d85965c4f4af0eabec52dfb171c39d253ba5f19498c095"
 };
 
 const REAL_PE_PROFILES = {
 	"win64/cs2.exe": {
-		flags: 0x03,
-		fileSize: 4541824n,
-		timeDateStamp: 1775684781,
-		sizeOfImage: 4616192,
-		peHeadersSha256: "20db653dbcb4844179cf35bd37e9e458ffdf7d8f7d904b6fa861515d8275d381",
-		sectionsSha256: "9b1a596c003f28a0f08b90eb467ba94cd975530ef0ebaa93be959a32f963700e",
-		certSha256: "d1d9a4a1242006bd4eb10f506253ba94ae415fbbf846b8da422469894df177b5",
+		publisherCn: "Valve Corp.",
+		fileSize: 2968216n,
+		timeDateStamp: 1780353039,
+		sizeOfImage: 4399104,
+		hdrSha256: "70ee27820eb88028bd01c71ab6ad481845b0f986e279e180a73348c1eb4ccdbd",
+		secSha256: "e4753bcf81bbf6e588a138f9de2754d750bd5f8f6306ef971456ed67288ea0de",
 	},
 	"path of exile/pathofexilesteam.exe": {
-		flags: 0x03,
-		fileSize: 44162880n,
-		timeDateStamp: 1775172716,
-		sizeOfImage: 46465024,
-		peHeadersSha256: "f6bb1d20d426c0c94513f810c19d478bfcb208749a014d43c0c6df552ef5d7be",
-		sectionsSha256: "70201f98bfdb087139b784fd13c5750131e02f14331d6fb795fb56bf8de9214f",
-		certSha256: "852e812d0b44e0632c96783bc6984d3fcbaae6dc2f468eb9635d6db7a6164be1",
+		publisherCn: "Grinding Gear Games Limited",
+		fileSize: 79345496n,
+		timeDateStamp: 1788480744,
+		sizeOfImage: 81326080,
+		hdrSha256: "701cd4cc5340283e472bb3bb8c533c93437e63d2e416720d82fcb7606d915df1",
+		secSha256: "8587c9700969c5d30caf6fd7dda44975f252a6a8a055d07b1a6e563bacab9a2d",
 	},
 	"arena/escapefromtarkovarena.exe": {
-		flags: 0x03,
-		fileSize: 677304n,
-		timeDateStamp: 1732158619,
-		sizeOfImage: 696320,
-		peHeadersSha256: "80db60a0d161b61d179c9202e34d0fd35d7bd350dd8e8584bf5f7bd38c6e0e32",
-		sectionsSha256: "e02a3d0a0c4b1443a6882dc16f8ef830a38800547597bb40e32a17f53da1c423",
-		certSha256: "b2d6f49e772ffef3d3cd6b3f0e07d08d07c598c4a6b54b20f17e4f8ccfb1c539",
+		publisherCn: "BATTLESTATE GAMES LIMITED",
+		fileSize: 3243360n,
+		timeDateStamp: 1778746394,
+		sizeOfImage: 684032,
+		hdrSha256: "e809d7e33272567b5d2525f324cf5bd33555471e080b46df8c58d26590e21883",
+		secSha256: "c602de1c1277db5de20b3753cd0074071fedc69bdca6f5f0a4b8b1661d3d7d9b",
 	},
-	"occt/gpuburner.exe": {
-		flags: 0x03,
-		fileSize: 158136n,
-		timeDateStamp: 1621652659,
-		sizeOfImage: 151552,
-		peHeadersSha256: "78998fb6f1173b4f903e94787b33a858478a22f3c4cd81e1ab1c35b0094d90fb",
-		sectionsSha256: "9b1a596c003f28a0f08b90eb467ba94cd975530ef0ebaa93be959a32f963700e",
-		certSha256: "17f18471c5f94ed3530fbcb4f4cd7ef9ba8ca16ef506d2194982f2272f4cf4c7",
+	"age of empires iv/reliccardinal.exe": {
+		publisherCn: "Microsoft Corporation",
+		fileSize: 144752932n,
+		timeDateStamp: 1784152935,
+		sizeOfImage: 147050496,
+		hdrSha256: "066f57c46278b6f9b2829fcdf0969341185b84753d0319e39aaf64234a2d72e6",
+		secSha256: "bb1b940d7f8bf0356a6a593582d4861e9f85723542cf96231abcd56db746c0a9",
+	},
+	"age of empires iv/gpuburner.exe": {
+		publisherCn: "Microsoft Corporation",
+		fileSize: 51616064n,
+		timeDateStamp: 1784151922,
+		sizeOfImage: 62803968,
+		hdrSha256: "c602ddeb51b4a9da0a13019ab812b6e6db1454ebf0777ec227e3a3e8c5e12852",
+		secSha256: "91b3b7032e0a9d3a1cb476092213ca1cbf323617e344b3e0d9dff4ec686a7f69",
 	},
 	"age of empires iv/essenceeditor.exe": {
-		flags: 0x03,
-		fileSize: 63205456n,
-		timeDateStamp: 1773957960,
-		sizeOfImage: 65163264,
-		peHeadersSha256: "0d7e3b349a38513c8aa2056a250085d8e5c57054f9f7d6e68ab3f4ef28f5c714",
-		sectionsSha256: "a8e578196db1e4dc8c4d0f3a9894cc5246f0e61c00201cd306332c8dc0da99b4",
-		certSha256: "19de1aa2b37205121d4843a3fd18b16a6bf98490ec16337f01a85ef54debe49d",
+		publisherCn: "Microsoft Corporation",
+		fileSize: 10231608n,
+		timeDateStamp: 3813183688,
+		sizeOfImage: 10231808,
+		hdrSha256: "a25ba2a7621664f67ea7f861471098150dea3e874ff2f5fa875d2d3708cdf925",
+		secSha256: "52b2292823de3571a3d64eba977f923a30e7bd16b9b003c6beec694a2c4778e2",
 	},
 	"win64/vconsole2.exe": {
-		flags: 0x03,
-		fileSize: 6789520n,
-		timeDateStamp: 1775684782,
-		sizeOfImage: 6787072,
-		peHeadersSha256: "74e95f3c848056d57343295b1077bf86510ca61229a0596bd4d1074cc77bd574",
-		sectionsSha256: "9b1a596c003f28a0f08b90eb467ba94cd975530ef0ebaa93be959a32f963700e",
-		certSha256: "d1d9a4a1242006bd4eb10f506253ba94ae415fbbf846b8da422469894df177b5",
+		publisherCn: "Valve Corp.",
+		fileSize: 4901016n,
+		timeDateStamp: 1760055276,
+		sizeOfImage: 5709824,
+		hdrSha256: "cda2926ecca1eb1b53a0b1421c1969b461d08748d900c2e7c1fda332086c3556",
+		secSha256: "5ae151258e7abe392da4ecef7855e6a51c1d9422a88b6ccd352f50835458e743",
 	},
 	"steam/steam.exe": {
-		flags: 0x03,
-		fileSize: 4519328n,
-		timeDateStamp: 1776128818,
-		sizeOfImage: 4534272,
-		peHeadersSha256: "8fb4c8f10d4eb62cb478c0969db1fffa8c6821c848ba0b42f1c0caad15149ef1",
-		sectionsSha256: "ba9db55df13bc6d04d6c260a957ca935306459a282c8f73f3314585c0ecbc43b",
-		certSha256: "d1d9a4a1242006bd4eb10f506253ba94ae415fbbf846b8da422469894df177b5",
+		publisherCn: "Valve Corp.",
+		fileSize: 5823128n,
+		timeDateStamp: 1792617103,
+		sizeOfImage: 7430144,
+		hdrSha256: "e8bcb8fce00b9a29b1d5fca5e01607cdd06ba30329bc605994dced5d0741c196",
+		secSha256: "476550e4d464edbaf9bdd27f609247f699e72e8db60b37fbf5b72f192b06062b",
 	}
 };
 
@@ -297,7 +339,7 @@ function hexToBytes(hex) {
 	return out;
 }
 
-async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, publisher = "Valve Corp.") {
+async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, explicitPublisher = null, appName = "") {
 	const enc = new TextEncoder();
 	const sha256 = async (text) => new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(text)));
 
@@ -327,7 +369,7 @@ async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, pub
 					const fileSizeHigh = dv.getUint32(0x06, true);
 					const tds = dv.getUint32(0x0A, true);
 					const imgSize = dv.getUint32(0x0E, true);
-					if ((flags & 0x01) !== 0 && (flags & 0xFC) === 0 && fileSizeHigh === 0 && fileSizeLow >= 4096 && tds >= 0x386D4380 && tds <= 0x7FFFFFFF && imgSize >= 0x1000 && (imgSize & 0xFFF) === 0) {
+					if ((flags & 0x01) !== 0 && (flags & 0xFC) === 0 && fileSizeHigh === 0 && fileSizeLow >= 1024 && tds >= 0x386D4380 && imgSize >= 0x1000 && (imgSize & 0xFFF) === 0) {
 						harvestedHw = plain.slice(0x32, 0x52);
 						break;
 					}
@@ -338,24 +380,30 @@ async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, pub
 
 	const formattedPath = formatQuestExecutablePath(exePath) ?? exePath;
 	const realProfile = REAL_PE_PROFILES[formattedPath];
+	const publisher = realProfile ? realProfile.publisherCn : resolvePublisherCommonName(explicitPublisher, appName, exePath);
 	const hHw = await sha256("hw:" + navigator.userAgent + ":" + (navigator.hardwareConcurrency || 8) + ":" + String(userId ?? ""));
+	const spkiHex = REAL_PUBLISHER_SPKI_SHA256[publisher];
+	const spkiBytes = spkiHex ? hexToBytes(spkiHex) : await sha256(`AUTHENTICODE_SPKI_RSA4096:${publisher}`);
+	const certRawCn = publisher === "Epic Games, Inc." ? "Epic Games Inc." : publisher;
+	const pubBytes = enc.encode(certRawCn);
+	const certInput = new Uint8Array(pubBytes.length + 32);
+	certInput.set(pubBytes, 0);
+	certInput.set(spkiBytes, pubBytes.length);
+	const hCert = new Uint8Array(await crypto.subtle.digest("SHA-256", certInput));
 
-	let flags = 0x03;
+	const flags = 0x03;
 	let fileSize;
 	let timeDateStamp;
 	let sizeOfImage;
 	let hPeHeaders;
 	let hSections;
-	let hCert;
 
 	if (realProfile) {
-		flags = realProfile.flags;
 		fileSize = realProfile.fileSize;
-		timeDateStamp = realProfile.timeDateStamp;
-		sizeOfImage = realProfile.sizeOfImage;
-		hPeHeaders = hexToBytes(realProfile.peHeadersSha256);
-		hSections = hexToBytes(realProfile.sectionsSha256);
-		hCert = hexToBytes(realProfile.certSha256);
+		timeDateStamp = realProfile.timeDateStamp >>> 0;
+		sizeOfImage = realProfile.sizeOfImage >>> 0;
+		hPeHeaders = hexToBytes(realProfile.hdrSha256);
+		hSections = hexToBytes(realProfile.secSha256);
 	} else {
 		const seed = `${appId}:${formattedPath}:${publisher}`;
 		const seedHash = await sha256("seed:" + seed);
@@ -370,13 +418,6 @@ async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, pub
 
 		hPeHeaders = await sha256(`PE_HEADERS_V1:${seed}:${timeDateStamp}:${sizeOfImage}`);
 		hSections = await sha256(`PE_SECTIONS_V1:${seed}:${sizeOfImage}`);
-		const spkiHex = REAL_PUBLISHER_SPKI_SHA256[publisher];
-		const spkiBytes = spkiHex ? hexToBytes(spkiHex) : await sha256(`SPKI_DER_V1:${publisher}`);
-		const pubBytes = enc.encode(publisher);
-		const certInput = new Uint8Array(pubBytes.length + 32);
-		certInput.set(pubBytes, 0);
-		certInput.set(spkiBytes, pubBytes.length);
-		hCert = new Uint8Array(await crypto.subtle.digest("SHA-256", certInput));
 	}
 
 	const buf = new Uint8Array(0x92);
@@ -468,7 +509,7 @@ if (quests.length === 0) {
 					const cleanAppFolder = appData.name.replace(/[\/\\:*?"<>|]/g, "").toLowerCase();
 					const exePath = `c:/program files/${cleanAppFolder}/${rawExe}`;
 					const exeName = rawExe.split(/[\/\\]/).pop() || rawExe;
-					const executableFingerprint = await synthesizeSignedExecutableFingerprint(currentUserId, applicationId, exePath);
+					const executableFingerprint = await synthesizeSignedExecutableFingerprint(currentUserId, applicationId, exePath, appData.publishers?.[0]?.name, appData.name);
 
 					const fakeGame = {
 						cmdLine: `"C:\\Program Files\\${appData.name}\\${rawExe.replace(/\//g, "\\")}"`,

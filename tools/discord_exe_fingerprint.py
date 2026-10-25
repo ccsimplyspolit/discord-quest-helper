@@ -74,6 +74,14 @@ REAL_PE_PROFILES: dict[str, dict] = {
         "hdr_sha256": "e809d7e33272567b5d2525f324cf5bd33555471e080b46df8c58d26590e21883",
         "sec_sha256": "c602de1c1277db5de20b3753cd0074071fedc69bdca6f5f0a4b8b1661d3d7d9b",
     },
+    "age of empires iv/reliccardinal.exe": {
+        "publisher_cn": "Microsoft Corporation",
+        "file_size": 144752932,
+        "time_date_stamp": 1784152935,
+        "size_of_image": 147050496,
+        "hdr_sha256": "066f57c46278b6f9b2829fcdf0969341185b84753d0319e39aaf64234a2d72e6",
+        "sec_sha256": "bb1b940d7f8bf0356a6a593582d4861e9f85723542cf96231abcd56db746c0a9",
+    },
     "age of empires iv/gpuburner.exe": {
         "publisher_cn": "Microsoft Corporation",
         "file_size": 51616064,
