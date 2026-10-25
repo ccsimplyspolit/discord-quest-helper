@@ -523,6 +523,18 @@ async function ensureSealedQuestMetadata(questId?: string): Promise<void> {
 
 const questRestHookedFns = new WeakSet<Function>();
 
+function doesAdDecisionMatchQuest(adDecision: any, questId: string): boolean {
+    if (!adDecision || !questId) return false;
+    const id = String(questId);
+    return (
+        String(adDecision?.questId ?? "") === id ||
+        String(adDecision?.adCreativeId ?? "") === id ||
+        String(adDecision?.creative?.id ?? "") === id ||
+        String(adDecision?.creative?.quest_id ?? "") === id ||
+        String(adDecision?.adDecisionData?.ad_id ?? "") === id
+    );
+}
+
 function installQuestRestInterceptor() {
     try {
         if (!RestAPI || typeof RestAPI.post !== "function" || questRestHookedFns.has(RestAPI.post)) return;
@@ -560,16 +572,17 @@ function installQuestRestInterceptor() {
                         const questId = enrollOrClaim[1];
                         const q = (QuestsStore?.getQuest?.(questId) ?? QuestsStore?.quests?.get?.(questId)) as any;
                         const adMap = AdDeliveryStore?.deliveryAdDecisionByPlacement;
-                        const adDecision1 = adMap?.get?.(1);
-                        const adDecision3 = adMap?.get?.(3);
+                        const rawDecision1 = adMap?.get?.(1);
+                        const rawDecision3 = adMap?.get?.(3);
+                        const adDecision1 = doesAdDecisionMatchQuest(rawDecision1, questId) ? rawDecision1 : null;
+                        const adDecision3 = doesAdDecisionMatchQuest(rawDecision3, questId) ? rawDecision3 : null;
 
                         if (body.metadata_sealed == null) {
                             const sealed =
                                 q?.metadataSealed ||
                                 q?.metadata_sealed ||
                                 q?.config?.metadataSealed ||
-                                adDecision1?.metadataSealed ||
-                                adDecision3?.metadataSealed;
+                                (body.location !== 11 ? (adDecision1?.metadataSealed || adDecision3?.metadataSealed) : null);
                             if (sealed) body.metadata_sealed = sealed;
                             else ensureSealedQuestMetadata(questId);
                         }
@@ -1012,27 +1025,41 @@ async function processClaimQueue() {
             claimingQuestIds.add(questId);
             let abortQueueOnCaptcha = false;
             try {
+                const completedAtMs = nextQuest.userStatus?.completedAt
+                    ? new Date(nextQuest.userStatus.completedAt).getTime()
+                    : 0;
+                const elapsedSinceComplete = completedAtMs > 0 ? Date.now() - completedAtMs : 999999;
+                if (elapsedSinceComplete >= 0 && elapsedSinceComplete < 5000) {
+                    const postCompleteWait = (5000 - elapsedSinceComplete) + Math.floor(Math.random() * 2000);
+                    await new Promise(resolve => setTimeout(resolve, postCompleteWait));
+                }
+
                 await ensureSealedQuestMetadata(questId);
                 console.log(`[CompleteDiscordQuest] Claiming completed quest reward: ${questName} (platform=${platform})`);
                 if (typeof QuestClaimAction === "function") {
                     const res = await QuestClaimAction(questId, platform, location);
                     if (res?.errors?.length > 0 || res?.body?.captcha_key) {
                         failedClaimQuestIds.add(questId);
+                        console.warn(`[CompleteDiscordQuest] Auto-claim returned errors for ${questName}:`, JSON.stringify(res?.errors || res?.body || {}));
                         if (res?.body?.captcha_key || /captcha/i.test(JSON.stringify(res?.errors || ""))) {
                             abortQueueOnCaptcha = true;
                         }
+                    } else {
+                        console.log(`[CompleteDiscordQuest] Successfully claimed quest reward: ${questName}`);
                     }
                 } else {
                     await RestAPI.post({
                         url: `/quests/${questId}/claim-reward`,
                         body: { platform, location }
                     });
+                    console.log(`[CompleteDiscordQuest] Successfully claimed quest reward: ${questName}`);
                 }
             } catch (claimErr: any) {
                 // Do not retry quests that require interactive Captcha or return 4xx
                 failedClaimQuestIds.add(questId);
-                console.warn("[CompleteDiscordQuest] Auto-claim skipped/deferred to manual UI for:", questName, claimErr);
-                if (claimErr?.status === 400 || claimErr?.status === 403 || claimErr?.body?.captcha_key || /captcha/i.test(String(claimErr?.message || claimErr))) {
+                const errSummary = `status=${claimErr?.status ?? claimErr?.httpStatus ?? "unknown"} body=${JSON.stringify(claimErr?.body ?? claimErr?.text ?? claimErr?.message ?? String(claimErr))}`;
+                console.warn(`[CompleteDiscordQuest] Auto-claim skipped/deferred to manual UI for ${questName}: ${errSummary}`);
+                if (claimErr?.status === 400 || claimErr?.status === 403 || claimErr?.body?.captcha_key || /captcha/i.test(errSummary)) {
                     abortQueueOnCaptcha = true;
                 }
             } finally {
@@ -1781,12 +1808,21 @@ function broadcastQuestCompletedToActivityFrames(applicationId?: string | null):
     return sent;
 }
 
-const syncedActivityIframeCounts = new WeakMap<HTMLIFrameElement, number>();
-const pcSyncedActivityIframes = new WeakSet<HTMLIFrameElement>();
+let syncedActivityIframeCounts = new WeakMap<HTMLIFrameElement, number>();
+let pcSyncedActivityIframes = new WeakSet<HTMLIFrameElement>();
+let lastSyncedScoreConfig = "";
 
 function installActivityFrameSyncLoop() {
     const syncMountedValorantAcesFrames = () => {
         try {
+            const { scoreMode, customScore } = getConfiguredScoreSettings();
+            const currentScoreConfig = `${scoreMode}:${customScore}`;
+            if (lastSyncedScoreConfig && lastSyncedScoreConfig !== currentScoreConfig) {
+                syncedActivityIframeCounts = new WeakMap<HTMLIFrameElement, number>();
+                pcSyncedActivityIframes = new WeakSet<HTMLIFrameElement>();
+            }
+            lastSyncedScoreConfig = currentScoreConfig;
+
             const frames = findActivityIframes(VALORANT_ACES_APP_ID);
             if (frames.length === 0) return;
             let needsFullBroadcast = false;
@@ -1804,7 +1840,6 @@ function installActivityFrameSyncLoop() {
             if (needsFullBroadcast) {
                 broadcastQuestCompletedToActivityFrames(VALORANT_ACES_APP_ID);
             } else if (needsPcSync) {
-                const { scoreMode, customScore } = getConfiguredScoreSettings();
                 const nativeHelper = getActivityNativeHelper();
                 nativeHelper?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID, scoreMode, customScore)
                     ?.then?.((res: any) => {

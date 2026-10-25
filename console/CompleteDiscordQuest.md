@@ -684,9 +684,67 @@ if (quests.length === 0) {
 
 					const ARISE_TITLES = ["chronicle-ace", "crashies-ace", "f0rsaken-ace", "tenz-ace", "jawgemo-ace", "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"];
 					const ARISE_BADGES = ["Bronze", "Silver", "Gold"];
-					const ARISE_SCORES = { "ace-1": 24368, "ace-2": 24379, "ace-3": 24545, "ace-4": 24540, "ace-5": 24457, "ace-6": 23344, "ace-7": 23630, "ace-8": 23838, "ace-9": 23058, "ace-10": 22423 };
+					const ARISE_BOARDS = [
+						{ boardId: "ace-1", aceTag: "ace:01", playerName: "Chronicle", teamCode: "GMB", team: "ALPHA", ceiling: 25766, fallbackTop2: 24367 },
+						{ boardId: "ace-2", aceTag: "ace:02", playerName: "crashies", teamCode: "OPTC", team: "OMEGA", ceiling: 25766, fallbackTop2: 24378 },
+						{ boardId: "ace-3", aceTag: "ace:03", playerName: "f0rsakeN", teamCode: "PRX", team: "ALPHA", ceiling: 25766, fallbackTop2: 24544 },
+						{ boardId: "ace-4", aceTag: "ace:04", playerName: "TenZ", teamCode: "SEN", team: "OMEGA", ceiling: 25766, fallbackTop2: 24539 },
+						{ boardId: "ace-5", aceTag: "ace:05", playerName: "jawgemo", teamCode: "EG", team: "ALPHA", ceiling: 25766, fallbackTop2: 24456 },
+						{ boardId: "ace-6", aceTag: "ace:08", playerName: "bstrdd", teamCode: "MIBR", team: "OMEGA", ceiling: 25766, fallbackTop2: 23343 },
+						{ boardId: "ace-7", aceTag: "ace:06", playerName: "Aspas", teamCode: "MIBR", team: "ALPHA", ceiling: 25137, fallbackTop2: 23629 },
+						{ boardId: "ace-8", aceTag: "ace:07", playerName: "jinggg", teamCode: "PRX", team: "OMEGA", ceiling: 25137, fallbackTop2: 23837 },
+						{ boardId: "ace-9", aceTag: "ace:09", playerName: "KangKang", teamCode: "EDG", team: "ALPHA", ceiling: 25766, fallbackTop2: 23057 },
+						{ boardId: "ace-10", aceTag: "ace:10", playerName: "Jamppi", teamCode: "VIT", team: "OMEGA", ceiling: 23748, fallbackTop2: 22422 }
+					];
+					const ARISE_SCORES = Object.fromEntries(ARISE_BOARDS.map(b => [b.boardId, b.fallbackTop2 + 1]));
+
+					const solveShotScoreRun = (targetScore, meta) => {
+						const T = Math.max(2000, Math.min(meta.ceiling, Math.round(Number(targetScore) || (meta.fallbackTop2 + 1))));
+						const maxMatchScore = Math.round(meta.ceiling / 5.2);
+						let chosenS = maxMatchScore, chosenTotalTtkMs = 3500;
+						const tryS = (s, minTtk, maxTtk, mult5) => {
+							const reqMult = T / (2.0 * s);
+							if (reqMult < 0.999 || reqMult > 2.601) return false;
+							const ratio = Math.max(0, Math.min(1, (reqMult - 1.0) / 1.6));
+							const rawMeanTtk = 1.8 - 1.1 * Math.pow(ratio, 1.0 / 1.4);
+							if (rawMeanTtk < minTtk - 0.01 || rawMeanTtk > maxTtk + 0.01) return false;
+							const baseTotalMs = Math.round(rawMeanTtk * 5000);
+							for (let d = -15; d <= 15; d++) {
+								const candTotalMs = baseTotalMs + d;
+								if (candTotalMs < 3500 || candTotalMs > 9000 || (mult5 && candTotalMs % 5 !== 0)) continue;
+								const candMeanTtk = Number((candTotalMs / 5000).toFixed(3));
+								if (candMeanTtk < minTtk || candMeanTtk > maxTtk) continue;
+								const actualI = Math.max(0, Math.min(1, (1.8 - candMeanTtk) / 1.1));
+								const actualMult = 1.0 + 1.6 * Math.pow(actualI, 1.4);
+								if (Math.round(s * actualMult * 2.0) === T) {
+									chosenS = s;
+									chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
+									return true;
+								}
+							}
+							return false;
+						};
+						let solved = false;
+						for (let s = maxMatchScore - 5; s >= 800; s--) if (tryS(s, 0.71, 1.18, true)) { solved = true; break; }
+						if (!solved) for (let s = maxMatchScore; s >= 500; s--) if (tryS(s, 0.70, 1.80, true)) { solved = true; break; }
+						if (!solved) for (let s = maxMatchScore; s >= 300; s--) if (tryS(s, 0.70, 1.80, false)) { solved = true; break; }
+						const meanTtk = Number((chosenTotalTtkMs / 5000).toFixed(3));
+						const bestTtk = Number((meanTtk * 0.72).toFixed(3));
+						const bestTtkMs = Math.round(bestTtk * 1000);
+						const remMs = chosenTotalTtkMs - bestTtkMs;
+						const remBase = Math.floor(remMs / 4);
+						const otherFour = [-34, -11, 14, 31].map(off => Math.max(bestTtkMs + 10, remBase + off));
+						otherFour[3] += remMs - otherFour.reduce((a, b) => a + b, 0);
+						const shotTtksMs = [bestTtkMs, ...otherFour].sort((a, b) => a - b);
+						let cursorMs = 1150;
+						const gaps = [0, 1420, 1680, 1340, 1590];
+						const cumulativeMs = shotTtksMs.map((ms, k) => (cursorMs += gaps[k] + ms));
+						return { total: T, matchScore: chosenS, meanTtk, bestTtk, shotTtksMs, cumulativeMs };
+					};
 
 					const broadcastActivityCompletion = () => {
+						const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
+						const hasNativeSync = typeof nativeHelper?.syncActivityMaxRecords === "function";
 						let count = 0;
 						for (const iframe of document.querySelectorAll("iframe")) {
 							const src = String(iframe?.src || "");
@@ -694,14 +752,15 @@ if (quests.length === 0) {
 								try {
 									for (const titleId of ARISE_TITLES) iframe.contentWindow?.postMessage({ type: "award-title", payload: titleId }, "*");
 									for (const rank of ARISE_BADGES) iframe.contentWindow?.postMessage({ type: "award-badge", payload: rank }, "*");
-									for (const [leaderboardId, score] of Object.entries(ARISE_SCORES)) iframe.contentWindow?.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+									if (!hasNativeSync) {
+										for (const [leaderboardId, score] of Object.entries(ARISE_SCORES)) iframe.contentWindow?.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+									}
 									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
 									count++;
 								} catch {}
 							}
 						}
 						try {
-							const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
 							nativeHelper?.syncActivityMaxRecords?.(String(applicationId || "1536318183873454090"))?.catch?.(() => null);
 						} catch {}
 						return count;
@@ -738,14 +797,16 @@ if (quests.length === 0) {
 								}
 
 								const baseOrigin = `https://${applicationId}.discordsays.com`;
+								const universeId = "78a74ba6-b027-4b0e-a686-9a6f4124c068";
+								const appVersion = "spades-prod-main-4835c58";
 								const buildHeaders = (token = "", extra = {}) => ({
 									"Content-Type": "application/json",
 									"Accept": "*/*",
 									"X-Auth-Token": token,
-									"X-Universe-ID": "78a74ba6-b027-4b0e-a686-9a6f4124c068",
+									"X-Universe-ID": universeId,
 									"X-Discord-Activity-Id": String(applicationId),
 									"X-Discord-Hostname": `${applicationId}.discordsays.com`,
-									"X-Arise-Client": "spades-prod-main-4835c58",
+									"X-Arise-Client": appVersion,
 									...extra
 								});
 								const authRes = await fetch(`${baseOrigin}/.proxy/acf/authorize`, {
@@ -766,6 +827,24 @@ if (quests.length === 0) {
 											const regData = await regRes.json().catch(() => null);
 											if (regData?.authToken) ariseToken = regData.authToken;
 										}
+										let myUserId = "";
+										try {
+											const b64 = ariseToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+											myUserId = JSON.parse(atob(b64))?.sub || "";
+										} catch {}
+										const sessionId = crypto.randomUUID(), deviceId = crypto.randomUUID();
+										let sessionDuration = 48000 + Math.floor(Math.random() * 24000);
+										const sendScrollV2 = async (eventType, strings, numbers) => {
+											sessionDuration += 1400 + Math.floor(Math.random() * 1900);
+											const body = JSON.stringify({
+												sessionId, deviceId, eventType, userId: myUserId || undefined, universeId,
+												deviceType: "desktop", timestamp: Date.now(), sessionDuration, platform: "discord",
+												metadata: { strings, numbers }, appVersion, isExternal: true
+											});
+											await fetch(`${baseOrigin}/.proxy/api/scrollv2`, {
+												method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body
+											}).catch(() => null);
+										};
 										await Promise.allSettled([
 											...ARISE_TITLES.map(id => {
 												const body = JSON.stringify({ id });
@@ -775,12 +854,40 @@ if (quests.length === 0) {
 												const body = JSON.stringify({ rank });
 												return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body });
 											}),
-											...Object.entries(ARISE_SCORES).map(([board, score]) => {
-												const body = JSON.stringify({ score });
-												return fetch(`${baseOrigin}/.proxy/api/leaderboards/${board}/submit`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body });
-											}),
 											fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }) })
 										]);
+										for (const meta of ARISE_BOARDS) {
+											let otherTop = meta.fallbackTop2, myScore = null, myPos = null;
+											try {
+												const lbRes = await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}`, {
+													method: "GET", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
+												}).catch(() => null);
+												if (lbRes?.ok) {
+													const lbData = await lbRes.json().catch(() => null);
+													const me = lbData?.me;
+													if (typeof me?.score === "number") myScore = me.score;
+													if (typeof me?.position === "number") myPos = me.position;
+													const cands = [];
+													for (const arr of [lbData?.topN, me?.surrounding?.above, me?.surrounding?.below]) {
+														if (Array.isArray(arr)) for (const e of arr) {
+															if (typeof e?.score === "number" && e.userId !== myUserId && e.userId !== me?.userId) cands.push(e.score);
+														}
+													}
+													if (cands.length > 0) otherTop = Math.max(...cands);
+												}
+											} catch {}
+											const targetScore = Math.max(1000, Math.min(meta.ceiling - 50, otherTop + 1));
+											if (myPos === 1 && myScore !== null && myScore > otherTop) continue;
+											if (myScore !== null && myScore > otherTop) continue;
+											const run = solveShotScoreRun(targetScore, meta);
+											await sendScrollV2("play_player", [meta.playerName, meta.teamCode, meta.aceTag], []);
+											for (let i = 0; i < 5; i++) await sendScrollV2("shot_taken", ["headshot"], [run.shotTtksMs[i], run.cumulativeMs[i]]);
+											await sendScrollV2("completed", [meta.aceTag, meta.team.toLowerCase()], [run.total, 1, run.total, 100, run.meanTtk, run.bestTtk, 0]);
+											const submitBody = JSON.stringify({ score: targetScore });
+											await fetch(`${baseOrigin}/.proxy/api/leaderboards/${meta.boardId}/submit`, {
+												method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(submitBody) }), body: submitBody
+											}).catch(() => null);
+										}
 										const progRes = await fetch(`${baseOrigin}/.proxy/acf/quest/progress`, {
 											method: "POST",
 											headers: buildHeaders(acfToken),

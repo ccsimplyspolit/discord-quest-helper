@@ -613,6 +613,63 @@ const settings = definePluginSettings({
     }
 });
 
+function doesAdDecisionMatchQuest(adDecision: any, questId: string): boolean {
+    if (!adDecision || !questId) return false;
+    const id = String(questId);
+    return (
+        String(adDecision?.questId ?? "") === id ||
+        String(adDecision?.adCreativeId ?? "") === id ||
+        String(adDecision?.creative?.id ?? "") === id ||
+        String(adDecision?.creative?.quest_id ?? "") === id ||
+        String(adDecision?.adDecisionData?.ad_id ?? "") === id
+    );
+}
+
+function synthesizePerformanceSnapshot() {
+    const totalMs = 300000 + Math.floor((Math.random() - 0.5) * 4000);
+    const fgRatio = 0.62 + Math.random() * 0.26;
+    const fgDurationMs = Math.round(totalMs * fgRatio);
+    const bgDurationMs = Math.max(0, totalMs - fgDurationMs);
+    const baseFgFps = 138 + Math.random() * 24;
+    const baseBgFps = 58.5 + Math.random() * 2.5;
+    const round2 = (n: number) => Number(n.toFixed(2));
+    return {
+        game_foreground_duration_ms: fgDurationMs,
+        game_background_duration_ms: bgDurationMs,
+        game_performance_duration_ms: totalMs,
+        game_foreground_fps_avg: round2(baseFgFps),
+        game_foreground_fps_max: round2(baseFgFps + 18 + Math.random() * 12),
+        game_foreground_fps_min: round2(baseFgFps - 32 - Math.random() * 14),
+        game_foreground_fps_p1: round2(baseFgFps - 26 - Math.random() * 8),
+        game_foreground_fps_p5: round2(baseFgFps - 18 - Math.random() * 6),
+        game_foreground_fps_p25: round2(baseFgFps - 6 - Math.random() * 4),
+        game_foreground_fps_p50: round2(baseFgFps + 0.8),
+        game_foreground_fps_p95: round2(baseFgFps + 11 + Math.random() * 5),
+        game_foreground_fps_stddev: round2(6.5 + Math.random() * 4.2),
+        game_background_fps_avg: round2(baseBgFps),
+        game_background_fps_max: round2(baseBgFps + 2.4),
+        game_background_fps_min: round2(baseBgFps - 5.2),
+        game_background_fps_p1: round2(baseBgFps - 4.1),
+        game_background_fps_p5: round2(baseBgFps - 2.3),
+        game_background_fps_p25: round2(baseBgFps - 0.6),
+        game_background_fps_p50: round2(baseBgFps + 0.1),
+        game_background_fps_p95: round2(baseBgFps + 1.2),
+        game_background_fps_stddev: round2(0.9 + Math.random() * 0.6),
+        game_foreground_jitter_ms_avg: round2(0.65 + Math.random() * 0.35),
+        game_foreground_jitter_ms_max: round2(5.2 + Math.random() * 3.4),
+        game_foreground_jitter_ms_min: round2(0.02 + Math.random() * 0.04),
+        game_foreground_jitter_ms_p50: round2(0.52 + Math.random() * 0.25),
+        game_foreground_jitter_ms_p95: round2(1.85 + Math.random() * 0.65),
+        game_foreground_jitter_ms_stddev: round2(0.58 + Math.random() * 0.28),
+        game_background_jitter_ms_avg: round2(0.95 + Math.random() * 0.45),
+        game_background_jitter_ms_max: round2(7.1 + Math.random() * 3.8),
+        game_background_jitter_ms_min: round2(0.05 + Math.random() * 0.05),
+        game_background_jitter_ms_p50: round2(0.78 + Math.random() * 0.32),
+        game_background_jitter_ms_p95: round2(2.65 + Math.random() * 0.85),
+        game_background_jitter_ms_stddev: round2(0.82 + Math.random() * 0.35)
+    };
+}
+
 export function ensureGameObjectHasValidFingerprint(game: any): any {
     if (!game || typeof game !== "object" || !settings.store.spoofSignedExeFingerprint) return game;
     try {
@@ -1039,6 +1096,43 @@ export default definePlugin({
                 logger.warn("RunningGameStore hook warning:", e);
             }
         });
+
+        waitFor(["getDiscordUtils", "GetSystemServicePerformanceMonitorSnapshot"], (service: any) => {
+            try {
+                if (!service) return;
+
+                if (typeof service.GetSystemServicePerformanceMonitorSnapshot === "function" && !isStealthHooked(service.GetSystemServicePerformanceMonitorSnapshot)) {
+                    const rawGetSnap = service.GetSystemServicePerformanceMonitorSnapshot;
+                    const origGetSnap = rawGetSnap.bind(service);
+                    service.GetSystemServicePerformanceMonitorSnapshot = cloakFunction(function (pid: number) {
+                        return Promise.resolve(origGetSnap(pid)).catch(() => {
+                            return synthesizePerformanceSnapshot();
+                        });
+                    }, rawGetSnap, "GetSystemServicePerformanceMonitorSnapshot");
+                    cleanupCallbacks.push(() => {
+                        service.GetSystemServicePerformanceMonitorSnapshot = rawGetSnap;
+                    });
+                }
+
+                if (typeof service.getExecutableFingerprintForProcess === "function" && !isStealthHooked(service.getExecutableFingerprintForProcess)) {
+                    const rawGetFp = service.getExecutableFingerprintForProcess;
+                    const origGetFp = rawGetFp.bind(service);
+                    service.getExecutableFingerprintForProcess = cloakFunction(function (pid: number) {
+                        try {
+                            const game = RunningGameStore?.getGameForPID?.(pid);
+                            const fp = game?.executableFingerprint || game?.exeFingerprint;
+                            if (typeof fp === "string" && fp.length === 196) {
+                                return Promise.resolve(fp);
+                            }
+                        } catch { }
+                        return origGetFp(pid);
+                    }, rawGetFp, "getExecutableFingerprintForProcess");
+                    cleanupCallbacks.push(() => {
+                        service.getExecutableFingerprintForProcess = rawGetFp;
+                    });
+                }
+            } catch { }
+        });
     },
 
     resolveQuestGameMetadata(questId: string, bodyAppId?: string) {
@@ -1212,16 +1306,17 @@ export default definePlugin({
                         const questId = enrollOrClaimMatch[1];
                         const quest = QuestStore?.getQuest?.(questId) ?? QuestStore?.quests?.get?.(questId);
                         const adMap = AdDeliveryStore?.deliveryAdDecisionByPlacement;
-                        const adDecision1 = adMap?.get?.(1);
-                        const adDecision3 = adMap?.get?.(3);
+                        const rawDecision1 = adMap?.get?.(1);
+                        const rawDecision3 = adMap?.get?.(3);
+                        const adDecision1 = doesAdDecisionMatchQuest(rawDecision1, questId) ? rawDecision1 : null;
+                        const adDecision3 = doesAdDecisionMatchQuest(rawDecision3, questId) ? rawDecision3 : null;
 
                         if (body.metadata_sealed == null) {
                             const sealed =
                                 quest?.metadataSealed ||
                                 quest?.metadata_sealed ||
                                 quest?.config?.metadataSealed ||
-                                adDecision1?.metadataSealed ||
-                                adDecision3?.metadataSealed;
+                                (body.location !== 11 ? (adDecision1?.metadataSealed || adDecision3?.metadataSealed) : null);
                             if (sealed) {
                                 body.metadata_sealed = sealed;
                                 if (settings.store.debugLogging) {
@@ -1335,13 +1430,23 @@ export default definePlugin({
             "ace-1": 25766, "ace-2": 25766, "ace-3": 25766, "ace-4": 25766, "ace-5": 25766,
             "ace-6": 25766, "ace-7": 25137, "ace-8": 25137, "ace-9": 25766, "ace-10": 23748
         };
-        const postedCounts = new WeakMap<HTMLIFrameElement, number>();
-        const pcSyncedFrames = new WeakSet<HTMLIFrameElement>();
+        let postedCounts = new WeakMap<HTMLIFrameElement, number>();
+        let pcSyncedFrames = new WeakSet<HTMLIFrameElement>();
+        let lastSyncedScoreConfig = "";
 
         const tick = () => {
             try {
                 // Defer to CompleteDiscordQuest if it is active to avoid duplicate postMessage/IPC sync loops
                 if ((window as any).Vencord?.Plugins?.plugins?.CompleteDiscordQuest?.started) return;
+
+                const scoreMode = String((settings.store as any).activityScoreMode || "top1_plus_1") as any;
+                const customScore = Number((settings.store as any).activityCustomScore) || 24500;
+                const currentScoreConfig = `${scoreMode}:${customScore}`;
+                if (lastSyncedScoreConfig && lastSyncedScoreConfig !== currentScoreConfig) {
+                    postedCounts = new WeakMap<HTMLIFrameElement, number>();
+                    pcSyncedFrames = new WeakSet<HTMLIFrameElement>();
+                }
+                lastSyncedScoreConfig = currentScoreConfig;
 
                 const iframes = Array.from(document.querySelectorAll("iframe")).filter(f => {
                     const src = String(f?.src || f?.getAttribute("src") || "");
@@ -1349,8 +1454,6 @@ export default definePlugin({
                 });
                 if (iframes.length === 0) return;
 
-                const scoreMode = String((settings.store as any).activityScoreMode || "top1_plus_1") as any;
-                const customScore = Number((settings.store as any).activityCustomScore) || 24500;
                 const hasNativeSync = typeof Native?.syncActivityMaxRecords === "function";
 
                 let needsNativeSync = false;

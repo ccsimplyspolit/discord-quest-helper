@@ -37,8 +37,16 @@ function setHeaderCaseInsensitive(headers: Record<string, string[]>, lowerName: 
     headers[lowerName] = value;
 }
 
+function extractOriginFromUrl(rawUrl: unknown): string {
+    if (typeof rawUrl !== "string" || !rawUrl) return "";
+    const match = rawUrl.match(/^(https?:\/\/[^/?#]+)/i);
+    return match?.[1] ?? "";
+}
+
 function sanitizeActivityResponseHeaders(responseHeaders: Record<string, string[]>, callerOrigin?: string): void {
-    const allowOrigin = callerOrigin || "https://discord.com";
+    const existingOriginKey = findHeaderKey(responseHeaders, "access-control-allow-origin");
+    const existingOrigin = existingOriginKey ? responseHeaders[existingOriginKey]?.[0] : undefined;
+    const allowOrigin = callerOrigin || (existingOrigin && existingOrigin !== "*" ? existingOrigin : "https://discord.com");
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-origin", [allowOrigin]);
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-credentials", ["true"]);
     setHeaderCaseInsensitive(responseHeaders, "access-control-allow-methods", [
@@ -70,7 +78,7 @@ function installActivityCorsAndPreflightBypass(): void {
     if (g.__vcActivityCorsWrapperInstalled) return;
     g.__vcActivityCorsWrapperInstalled = true;
 
-    const requestOriginById = new Map<number, string>();
+    const requestOriginById: Map<number, string> = (g.__vcActivityRequestOriginById ??= new Map<number, string>());
 
     app.whenReady().then(() => {
         try {
@@ -91,7 +99,9 @@ function installActivityCorsAndPreflightBypass(): void {
                     ({ id, url, requestHeaders, referrer }, cb) => {
                         if (requestHeaders) {
                             const originKey = findHeaderKey(requestHeaders, "origin");
-                            const rawOrigin = originKey ? String(requestHeaders[originKey] || "") : "";
+                            const refererKey = findHeaderKey(requestHeaders, "referer");
+                            const rawReferer = refererKey ? String(requestHeaders[refererKey] || "") : (typeof referrer === "string" ? referrer : "");
+                            const rawOrigin = (originKey ? String(requestHeaders[originKey] || "") : "") || extractOriginFromUrl(rawReferer);
                             if (rawOrigin) {
                                 if (requestOriginById.size > 2000) requestOriginById.clear();
                                 requestOriginById.set(id, rawOrigin);
@@ -102,11 +112,11 @@ function installActivityCorsAndPreflightBypass(): void {
                                 const targetHost = discordsaysMatch[1];
                                 const isFromDiscord =
                                     (rawOrigin && DISCORD_ORIGIN_RE.test(rawOrigin)) ||
+                                    (rawReferer && DISCORD_ORIGIN_RE.test(rawReferer)) ||
                                     (typeof referrer === "string" && DISCORD_ORIGIN_RE.test(referrer));
                                 if (isFromDiscord) {
                                     if (originKey) delete requestHeaders[originKey];
                                     requestHeaders.Origin = `https://${targetHost}`;
-                                    const refererKey = findHeaderKey(requestHeaders, "referer");
                                     if (refererKey) delete requestHeaders[refererKey];
                                     requestHeaders.Referer = `https://${targetHost}/`;
                                 }
@@ -126,8 +136,9 @@ function installActivityCorsAndPreflightBypass(): void {
                     }
 
                     const finalize = (resp: any) => {
-                        const headers = resp?.responseHeaders || details.responseHeaders;
-                        if (headers && typeof details.url === "string" && ACTIVITY_DOMAIN_RE.test(details.url)) {
+                        const isActivityUrl = typeof details.url === "string" && ACTIVITY_DOMAIN_RE.test(details.url);
+                        const headers = resp?.responseHeaders || details.responseHeaders || (isActivityUrl ? {} : undefined);
+                        if (headers && isActivityUrl) {
                             sanitizeActivityResponseHeaders(headers, callerOrigin);
                             if (details.method === "OPTIONS" || (details.method === "OPTIONS" && details.statusCode >= 400)) {
                                 cb({
@@ -341,24 +352,26 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
     let chosenTtkMult = 2.6;
     let solved = false;
 
-    const tryCandidateS = (s: number, minTtk: number, maxTtk: number): boolean => {
+    const tryCandidateS = (s: number, minTtk: number, maxTtk: number, requireMultipleOf5: boolean): boolean => {
         const reqMult = T / (2.0 * s);
-        if (reqMult < 1.0 || reqMult > 2.6) return false;
+        if (reqMult < 0.999 || reqMult > 2.601) return false;
         const ratio = Math.max(0, Math.min(1, (reqMult - 1.0) / 1.6));
         const i = Math.pow(ratio, 1.0 / 1.4);
         const rawMeanTtk = 1.8 - 1.1 * i;
-        if (rawMeanTtk < minTtk || rawMeanTtk > maxTtk) return false;
+        if (rawMeanTtk < minTtk - 0.01 || rawMeanTtk > maxTtk + 0.01) return false;
 
         const baseTotalMs = Math.round(rawMeanTtk * 5000);
-        for (let delta = -6; delta <= 6; delta++) {
+        for (let delta = -15; delta <= 15; delta++) {
             const candTotalMs = baseTotalMs + delta;
             if (candTotalMs < 3500 || candTotalMs > 9000) continue;
-            const candMeanTtk = candTotalMs / 5000;
+            if (requireMultipleOf5 && candTotalMs % 5 !== 0) continue;
+            const candMeanTtk = Number((candTotalMs / 5000).toFixed(3));
+            if (candMeanTtk < minTtk || candMeanTtk > maxTtk) continue;
             const actualI = Math.max(0, Math.min(1, (1.8 - candMeanTtk) / 1.1));
             const actualMult = 1.0 + 1.6 * Math.pow(actualI, 1.4);
             if (Math.round(s * actualMult * 2.0) === T) {
                 chosenS = s;
-                chosenTotalTtkMs = candTotalMs;
+                chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
                 chosenTtkMult = Number(actualMult.toFixed(4));
                 return true;
             }
@@ -366,36 +379,52 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
         return false;
     };
 
-    // Pass 1: Prefer realistic human pro TTK window (0.76s .. 1.18s)
+    // Pass 1: Prefer realistic human pro TTK window (0.71s .. 1.18s) with exact 3-decimal meanTtk (multiple of 5ms total)
     for (let s = maxMatchScore - 5; s >= 800; s--) {
-        if (tryCandidateS(s, 0.76, 1.18)) {
+        if (tryCandidateS(s, 0.71, 1.18, true)) {
             solved = true;
             break;
         }
     }
 
-    // Pass 2: Full valid dynamic curve window (0.70s .. 1.80s)
+    // Pass 2: Full valid dynamic curve window (0.70s .. 1.80s) with exact 3-decimal meanTtk
     if (!solved) {
         for (let s = maxMatchScore; s >= 500; s--) {
-            if (tryCandidateS(s, 0.70, 1.80)) {
+            if (tryCandidateS(s, 0.70, 1.80, true)) {
                 solved = true;
                 break;
             }
         }
     }
 
-    // Construct 5 individual shot TTKs in ms whose sum is `chosenTotalTtkMs`
-    const totalTtkMs = chosenTotalTtkMs;
-    const baseMs = Math.floor(totalTtkMs / 5);
-    const offsets = [-68, -29, 4, 37, 56];
-    const shotTtksMs = offsets.map(off => Math.max(380, baseMs + off));
-    const currentSum = shotTtksMs.reduce((a, b) => a + b, 0);
-    shotTtksMs[4] += totalTtkMs - currentSum;
-    shotTtksMs.sort((a, b) => a - b);
+    // Pass 3: Fallback allowing any 1ms step if 5ms step had no integer match
+    if (!solved) {
+        for (let s = maxMatchScore; s >= 300; s--) {
+            if (tryCandidateS(s, 0.70, 1.80, false)) {
+                solved = true;
+                break;
+            }
+        }
+    }
 
-    const bestTtkMs = shotTtksMs[0];
-    const bestTtk = Number((bestTtkMs / 1000).toFixed(3));
-    const meanTtk = Number((totalTtkMs / 5000).toFixed(4));
+    const totalTtkMs = chosenTotalTtkMs;
+    const meanTtk = Number((totalTtkMs / 5000).toFixed(3));
+    const bestTtk = Number((meanTtk * 0.72).toFixed(3));
+    const bestTtkMs = Math.round(bestTtk * 1000);
+
+    // Construct 5 individual shot TTKs in ms where shotTtksMs[0] === bestTtkMs and sum === totalTtkMs
+    const remMs = totalTtkMs - bestTtkMs;
+    const remBase = Math.floor(remMs / 4);
+    const remOffsets = [-34, -11, 14, 31];
+    const otherFour = remOffsets.map(off => Math.max(bestTtkMs + 10, remBase + off));
+    const otherSum = otherFour.reduce((a, b) => a + b, 0);
+    otherFour[3] += remMs - otherSum;
+    if (otherFour[3] < bestTtkMs) {
+        const deficit = bestTtkMs - otherFour[3];
+        otherFour[3] = bestTtkMs;
+        otherFour[2] = Math.max(bestTtkMs, otherFour[2] - deficit);
+    }
+    const shotTtksMs = [bestTtkMs, ...otherFour].sort((a, b) => a - b);
 
     const cumulativeMs: number[] = [];
     let cursorMs = 1150;
@@ -435,21 +464,37 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
 interface AriseSessionTelemetryState {
     sessionId: string;
     deviceId: string;
+    userId: string;
+    universeId: string;
+    appVersion: string;
     sessionDurationMs: number;
 }
 
 const ariseTelemetrySessionByUser = new Map<string, AriseSessionTelemetryState>();
 
-function getOrCreateAriseSessionState(userKey: string): AriseSessionTelemetryState {
+function getOrCreateAriseSessionState(
+    userKey: string,
+    deviceIdHint?: string,
+    universeId = DEFAULT_UNIVERSE_ID,
+    appVersion = DEFAULT_ARISE_CLIENT
+): AriseSessionTelemetryState {
     const key = userKey || "default";
     let state = ariseTelemetrySessionByUser.get(key);
     if (!state) {
         state = {
             sessionId: randomUUID(),
-            deviceId: randomUUID(),
+            deviceId: deviceIdHint || randomUUID(),
+            userId: userKey !== "default" ? userKey : "",
+            universeId,
+            appVersion,
             sessionDurationMs: 48000 + Math.floor(Math.random() * 24000)
         };
         ariseTelemetrySessionByUser.set(key, state);
+    } else {
+        if (deviceIdHint) state.deviceId = deviceIdHint;
+        if (userKey && userKey !== "default") state.userId = userKey;
+        if (universeId) state.universeId = universeId;
+        if (appVersion) state.appVersion = appVersion;
     }
     return state;
 }
@@ -467,9 +512,15 @@ async function sendAriseScrollV2Event(
     const body = JSON.stringify({
         sessionId: state.sessionId,
         deviceId: state.deviceId,
-        sessionDuration: state.sessionDurationMs,
         eventType,
+        userId: state.userId || undefined,
+        universeId: state.universeId || DEFAULT_UNIVERSE_ID,
+        deviceType: "desktop",
+        timestamp: Date.now(),
+        sessionDuration: state.sessionDurationMs,
+        platform: "discord",
         metadata: { strings, numbers },
+        appVersion: state.appVersion || DEFAULT_ARISE_CLIENT,
         isExternal: true
     });
     await fetch(`${baseOrigin}/.proxy/api/scrollv2`, {
@@ -515,7 +566,7 @@ async function sendAriseScrollV2RunTelemetry(
         state,
         "completed",
         [meta.aceTag, meta.team.toLowerCase()],
-        [run.total, 1, run.total, 100, run.meanTtk, run.bestTtk, 0]
+        [run.total, 1, run.total, 100, Number(run.meanTtk.toFixed(3)), Number(run.bestTtk.toFixed(3)), 0]
     );
 }
 
@@ -541,6 +592,7 @@ interface BoardTargetResolution {
 }
 
 const resolvedTargetsCache = new Map<string, { at: number; resolutions: BoardTargetResolution[] }>();
+const unlockedProfileRewardsByUser = new Set<string>();
 
 async function resolveTargetScoresForBoards(
     baseOrigin: string,
@@ -655,48 +707,64 @@ async function unlockAllAriseRewardsAndScores(
     buildHeaders: (token?: string, extra?: Record<string, string>) => Record<string, string>,
     isValorantAces = true,
     scoreMode: ActivityScoreMode = "top1_plus_1",
-    customScore = 24500
+    customScore = 24500,
+    deviceIdHint?: string
 ): Promise<BoardTargetResolution[]> {
     let resolutions: BoardTargetResolution[] = [];
     try {
-        const requests: Promise<any>[] = [
-            fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
-                method: "POST",
-                headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
-                body: undefined,
-                signal: AbortSignal.timeout(8000)
-            }).catch(() => null)
-        ];
+        const userKey = extractSubFromJwt(ariseToken) || "default";
+        const sampleHeaders = buildHeaders(ariseToken);
+        const universeId = sampleHeaders["X-Universe-ID"] || DEFAULT_UNIVERSE_ID;
+        const appVersion = sampleHeaders["X-Arise-Client"] || DEFAULT_ARISE_CLIENT;
 
-        if (isValorantAces) {
+        const requests: Promise<any>[] = [];
+        const profileKey = `${baseOrigin}:${userKey}:${isValorantAces ? "aces" : "generic"}`;
+        if (!unlockedProfileRewardsByUser.has(profileKey)) {
+            unlockedProfileRewardsByUser.add(profileKey);
             requests.push(
-                ...VALORANT_ACES_TITLES.map(id => {
-                    const body = JSON.stringify({ id });
-                    return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
-                        method: "POST",
-                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                        body,
-                        signal: AbortSignal.timeout(8000)
-                    }).catch(() => null);
-                }),
-                ...VALORANT_ACES_BADGES.map(rank => {
-                    const body = JSON.stringify({ rank });
-                    return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
-                        method: "POST",
-                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                        body,
-                        signal: AbortSignal.timeout(8000)
-                    }).catch(() => null);
-                })
+                fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
+                    method: "POST",
+                    headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }),
+                    body: undefined,
+                    signal: AbortSignal.timeout(8000)
+                }).catch(() => null)
             );
 
+            if (isValorantAces) {
+                requests.push(
+                    ...VALORANT_ACES_TITLES.map(id => {
+                        const body = JSON.stringify({ id });
+                        return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
+                            method: "POST",
+                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                            body,
+                            signal: AbortSignal.timeout(8000)
+                        }).catch(() => null);
+                    }),
+                    ...VALORANT_ACES_BADGES.map(rank => {
+                        const body = JSON.stringify({ rank });
+                        return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
+                            method: "POST",
+                            headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                            body,
+                            signal: AbortSignal.timeout(8000)
+                        }).catch(() => null);
+                    })
+                );
+            }
+        }
+
+        if (isValorantAces) {
             resolutions = await resolveTargetScoresForBoards(baseOrigin, ariseToken, buildHeaders, scoreMode, customScore);
             if (scoreMode !== "quest_only") {
-                const userKey = extractSubFromJwt(ariseToken) || "default";
-                const sessionState = getOrCreateAriseSessionState(userKey);
+                const sessionState = getOrCreateAriseSessionState(userKey, deviceIdHint, universeId, appVersion);
 
                 for (const item of resolutions) {
                     if (!item.shouldSubmit) continue;
+                    // Mark as submitted immediately so cached resolutions within the 20s TTL are never re-submitted
+                    item.shouldSubmit = false;
+                    item.myCurrentScore = Math.max(item.myCurrentScore ?? 0, item.targetScore);
+
                     await sendAriseScrollV2RunTelemetry(
                         baseOrigin,
                         ariseToken,
@@ -716,7 +784,9 @@ async function unlockAllAriseRewardsAndScores(
             }
         }
 
-        await Promise.allSettled(requests);
+        if (requests.length > 0) {
+            await Promise.allSettled(requests);
+        }
     } catch {}
     return resolutions;
 }
@@ -762,6 +832,7 @@ export async function syncActivityMaxRecords(
 (function() {
     try {
         const tok = window.localStorage.getItem("ARISEENGINE_AUTHTOKEN") || "";
+        const devId = window.localStorage.getItem("ARISE_DEVICE_ID") || "";
         let uid = "";
         if (tok && tok.split(".").length === 3) {
             const b64 = tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
@@ -784,20 +855,22 @@ export async function syncActivityMaxRecords(
                 }
             }
         }
-        return { uid, tok };
+        return { uid, tok, devId };
     } catch {}
-    return { uid: "", tok: "" };
+    return { uid: "", tok: "", devId: "" };
 })();
 `;
 
     let hostUserId = "";
     let discoveredToken = "";
+    let discoveredDeviceId = "";
     for (const frame of targetFrames) {
         try {
             const probed: any = await frame.executeJavaScript(probeScript, true);
             if (probed?.uid && !hostUserId) hostUserId = String(probed.uid).trim();
             if (probed?.tok && !discoveredToken) discoveredToken = String(probed.tok).trim();
-            if (hostUserId && discoveredToken) break;
+            if (probed?.devId && !discoveredDeviceId) discoveredDeviceId = String(probed.devId).trim();
+            if (hostUserId && discoveredToken && discoveredDeviceId) break;
         } catch {}
     }
 
@@ -958,6 +1031,12 @@ export async function syncActivityMaxRecords(
                                 rh.storageKey = baseKey;
                                 rh._storageKey = baseKey;
                             }
+                            rh._runs = [];
+                            rh._stored = null;
+                            rh._storedRuns = [];
+                            rh._levels = Object.create(null);
+                            rh._prev = null;
+                            rh._storageOk = true;
                             if (typeof rh._load === "function") rh._load();
                             touched = true;
                         }
@@ -992,6 +1071,9 @@ export async function syncActivityMaxRecords(
                             }
                             if (typeof ar._load === "function") ar._load();
                             touched = true;
+                        }
+                        if (scr.ariseLeaderboard && scr.ariseLeaderboard._cache) {
+                            scr.ariseLeaderboard._cache = Object.create(null);
                         }
                     }
 
@@ -1066,7 +1148,8 @@ export async function syncActivityMaxRecords(
             buildSimpleHeaders,
             appIdStr === VALORANT_ACES_APP_ID,
             scoreMode,
-            customScore
+            customScore,
+            discoveredDeviceId
         ).catch(() => null);
     }
 
