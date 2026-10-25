@@ -689,10 +689,11 @@ if (quests.length === 0) {
 								if (candMeanTtk < minTtk || candMeanTtk > maxTtk) continue;
 								const actualI = Math.max(0, Math.min(1, (1.8 - candMeanTtk) / 1.1));
 								const actualMult = 1.0 + 1.6 * Math.pow(actualI, 1.4);
-								if (Math.round(s * actualMult * 2.0) === T) {
+								const roundedMult = Number(actualMult.toFixed(4));
+								if (Math.round(s * actualMult * 2.0) === T && Math.round(s * roundedMult * 2.0) === T) {
 									chosenS = s;
 									chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
-									chosenTtkMult = Number(actualMult.toFixed(4));
+									chosenTtkMult = roundedMult;
 									return true;
 								}
 							}
@@ -730,14 +731,17 @@ if (quests.length === 0) {
 						const { scoreMode, customScore } = getScoreConfig();
 						const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
 						const hasNativeSync = typeof nativeHelper?.syncActivityMaxRecords === "function";
+						const isValorantAces = !applicationId || String(applicationId) === "1536318183873454090";
 						let count = 0;
 						for (const iframe of document.querySelectorAll("iframe")) {
 							const src = String(iframe?.src || "");
 							if (src.includes("discordsays.com") && (!applicationId || src.includes(String(applicationId)))) {
+								count++;
+								if (isValorantAces && hasNativeSync) continue;
 								try {
 									for (const titleId of ARISE_TITLES) iframe.contentWindow?.postMessage({ type: "award-title", payload: titleId }, "*");
 									for (const rank of ARISE_BADGES) iframe.contentWindow?.postMessage({ type: "award-badge", payload: rank }, "*");
-									if (!hasNativeSync && scoreMode !== "quest_only") {
+									if (scoreMode !== "quest_only") {
 										for (const meta of ARISE_BOARDS) {
 											const score = scoreMode === "legit_pro"
 												? meta.legitProScore
@@ -748,7 +752,6 @@ if (quests.length === 0) {
 										}
 									}
 									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
-									count++;
 								} catch {}
 							}
 						}
