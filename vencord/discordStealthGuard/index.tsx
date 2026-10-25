@@ -591,6 +591,21 @@ const settings = definePluginSettings({
         description: "Protect /quests/* heartbeat, video-progress, and enroll payloads (inject 2-segment executable_path, exeFingerprint, metadata_sealed, and stack_trace sanitization)",
         default: true,
     },
+    activityScoreMode: {
+        type: OptionType.SELECT,
+        description: "Leaderboard and Personal Best score mode for interactive Activity quests.",
+        options: [
+            { label: "World #1 (Top-2 + 1, humanized, never max ceiling)", value: "top1_plus_1", default: true },
+            { label: "Custom Score (Use exact custom score below)", value: "custom" },
+            { label: "Humanized Pro (21,800–22,450 legit 5-headshot range)", value: "legit_pro" },
+            { label: "Quest Only (Do not submit leaderboard scores)", value: "quest_only" }
+        ]
+    },
+    activityCustomScore: {
+        type: OptionType.NUMBER,
+        description: "Custom target score for Activity leaderboards and Personal Best cards (used when mode is Custom Score)",
+        default: 24500,
+    },
     debugLogging: {
         type: OptionType.BOOLEAN,
         description: "Log intercepted anti-fraud checks and quest heartbeats to console",
@@ -1308,37 +1323,81 @@ export default definePlugin({
             "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"
         ];
         const BADGES = ["Bronze", "Silver", "Gold"];
-        const SCORES: Record<string, number> = {
+        const TOP2_PLUS_1_SCORES: Record<string, number> = {
+            "ace-1": 24368, "ace-2": 24379, "ace-3": 24545, "ace-4": 24540, "ace-5": 24457,
+            "ace-6": 23344, "ace-7": 23630, "ace-8": 23838, "ace-9": 23058, "ace-10": 22423
+        };
+        const LEGIT_PRO_SCORES: Record<string, number> = {
+            "ace-1": 22340, "ace-2": 22185, "ace-3": 22410, "ace-4": 22290, "ace-5": 22120,
+            "ace-6": 21980, "ace-7": 22050, "ace-8": 22160, "ace-9": 21910, "ace-10": 21840
+        };
+        const CEILINGS: Record<string, number> = {
             "ace-1": 25766, "ace-2": 25766, "ace-3": 25766, "ace-4": 25766, "ace-5": 25766,
             "ace-6": 25766, "ace-7": 25137, "ace-8": 25137, "ace-9": 25766, "ace-10": 23748
         };
         const postedCounts = new WeakMap<HTMLIFrameElement, number>();
+        const pcSyncedFrames = new WeakSet<HTMLIFrameElement>();
 
         const tick = () => {
             try {
+                // Defer to CompleteDiscordQuest if it is active to avoid duplicate postMessage/IPC sync loops
+                if ((window as any).Vencord?.Plugins?.plugins?.CompleteDiscordQuest?.started) return;
+
                 const iframes = Array.from(document.querySelectorAll("iframe")).filter(f => {
                     const src = String(f?.src || f?.getAttribute("src") || "");
                     return src.includes(`${VALORANT_ACES_APP_ID}.discordsays.com`);
                 });
                 if (iframes.length === 0) return;
 
+                const scoreMode = String((settings.store as any).activityScoreMode || "top1_plus_1") as any;
+                const customScore = Number((settings.store as any).activityCustomScore) || 24500;
+                const hasNativeSync = typeof Native?.syncActivityMaxRecords === "function";
+
+                let needsNativeSync = false;
                 for (const iframe of iframes) {
                     const c = postedCounts.get(iframe) ?? 0;
-                    postedCounts.set(iframe, c + 1);
                     if (c < 4) {
+                        postedCounts.set(iframe, c + 1);
+                        needsNativeSync = true;
                         const win = iframe?.contentWindow;
                         if (win) {
                             for (const t of TITLES) win.postMessage({ type: "award-title", payload: t }, "*");
                             for (const b of BADGES) win.postMessage({ type: "award-badge", payload: b }, "*");
-                            for (const [leaderboardId, score] of Object.entries(SCORES)) {
-                                win.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+                            if (!hasNativeSync && scoreMode !== "quest_only") {
+                                const fallbackScores =
+                                    scoreMode === "legit_pro"
+                                        ? LEGIT_PRO_SCORES
+                                        : scoreMode === "custom"
+                                            ? Object.fromEntries(
+                                                Object.entries(CEILINGS).map(([k, ceil]) => [
+                                                    k,
+                                                    Math.max(1000, Math.min(ceil - 1, Math.round(customScore)))
+                                                ])
+                                            )
+                                            : TOP2_PLUS_1_SCORES;
+                                for (const [leaderboardId, score] of Object.entries(fallbackScores)) {
+                                    win.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+                                }
                             }
                             win.postMessage({ type: "quest-completed" }, "*");
                         }
+                    } else if (!pcSyncedFrames.has(iframe) && c < 15) {
+                        postedCounts.set(iframe, c + 1);
+                        needsNativeSync = true;
                     }
                 }
 
-                Native?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID)?.catch?.(() => null);
+                if (needsNativeSync) {
+                    Native?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID, scoreMode, customScore)
+                        ?.then?.((res: any) => {
+                            if (res?.pcSyncedFrames > 0) {
+                                for (const iframe of iframes) {
+                                    pcSyncedFrames.add(iframe);
+                                }
+                            }
+                        })
+                        ?.catch?.(() => null);
+                }
             } catch { }
         };
 

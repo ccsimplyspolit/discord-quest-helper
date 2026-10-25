@@ -77,6 +77,21 @@ export default definePluginSettings({
         description: "Whether to farm interactive activity / achievement quests automatically.",
         default: true
     },
+    activityScoreMode: {
+        type: OptionType.SELECT,
+        description: "Leaderboard and Personal Best score mode for interactive Activity quests.",
+        options: [
+            { label: "World #1 (Top-2 + 1, humanized, never max ceiling)", value: "top1_plus_1", default: true },
+            { label: "Custom Score (Use exact custom score below)", value: "custom" },
+            { label: "Humanized Pro (21,800–22,450 legit 5-headshot range)", value: "legit_pro" },
+            { label: "Quest Only (Do not submit leaderboard scores)", value: "quest_only" }
+        ]
+    },
+    activityCustomScore: {
+        type: OptionType.NUMBER,
+        description: "Custom target score for Activity leaderboards and Personal Best cards (used when mode is Custom Score)",
+        default: 24500
+    },
     farmRewardCodes: {
         type: OptionType.BOOLEAN,
         description: "Whether to farm reward code quests automatically.",

@@ -684,7 +684,7 @@ if (quests.length === 0) {
 
 					const ARISE_TITLES = ["chronicle-ace", "crashies-ace", "f0rsaken-ace", "tenz-ace", "jawgemo-ace", "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"];
 					const ARISE_BADGES = ["Bronze", "Silver", "Gold"];
-					const ARISE_SCORES = { "ace-1": 25766, "ace-2": 25766, "ace-3": 25766, "ace-4": 25766, "ace-5": 25766, "ace-6": 25766, "ace-7": 25137, "ace-8": 25137, "ace-9": 25766, "ace-10": 23748 };
+					const ARISE_SCORES = { "ace-1": 24368, "ace-2": 24379, "ace-3": 24545, "ace-4": 24540, "ace-5": 24457, "ace-6": 23344, "ace-7": 23630, "ace-8": 23838, "ace-9": 23058, "ace-10": 22423 };
 
 					const broadcastActivityCompletion = () => {
 						let count = 0;

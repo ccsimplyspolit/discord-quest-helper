@@ -203,7 +203,7 @@ function formatQuestExecutablePath(exePath: string | undefined | null): string |
 }
 
 const KNOWN_PUBLISHERS: ReadonlyArray<[RegExp, string]> = [
-    [/counter-strike|cs2|dota|team fortress|deadlock|half-life|left 4 dead|portal|steam|valve/i, "Valve Corp."],
+    [/counter-strike|cs2|dota|team fortress|deadlock|half-life|left 4 dead|portal/i, "Valve Corp."],
     [/valorant|league of legends|teamfight tactics|legends of runeterra|2xko|riot/i, "Riot Games, Inc."],
     [/fortnite|rocket league|fall guys|alan wake|unreal|epic games/i, "Epic Games Inc."],
     [/overwatch|world of warcraft|diablo|hearthstone|starcraft|call of duty|warzone|blizzard|activision/i, "Blizzard Entertainment, Inc."],
@@ -214,7 +214,7 @@ const KNOWN_PUBLISHERS: ReadonlyArray<[RegExp, string]> = [
     [/marvel rivals|once human|naraka|netease/i, "NetEase Interactive Entertainment Pte. Ltd."],
     [/THE FINALS|arc raiders|embark/i, "Embark Studios AB"],
     [/helldivers|arrowhead|playstation|sony/i, "PlayStation PC LLC"],
-    [/halo|forza|minecraft|sea of thieves|age of empires|flight simulator|xbox|microsoft|bethesda|doom|starfield|elder scrolls|fallout/i, "Microsoft Corporation"],
+    [/halo|forza|minecraft|sea of thieves|age of empires|reliccardinal|gpuburner|essenceeditor|flight simulator|xbox|microsoft|bethesda|doom|starfield|elder scrolls|fallout/i, "Microsoft Corporation"],
     [/cyberpunk|witcher|cd projekt/i, "CD PROJEKT S.A."],
     [/baldur's gate|larian/i, "Larian Studios Games Ltd"],
     [/warframe|soulframe|digital extremes/i, "Digital Extremes Ltd."],
@@ -232,14 +232,20 @@ const KNOWN_PUBLISHERS: ReadonlyArray<[RegExp, string]> = [
     [/palworld|pocketpair/i, "Pocketpair, Inc."],
     [/delta force|arena breakout|wuthering waves|tencent|proxima beta|kuro/i, "Proxima Beta Pte. Limited"],
     [/roblox/i, "Roblox Corporation"],
-    [/discord/i, "Discord Inc."]
+    [/discord/i, "Discord Inc."],
+    [/\b(?:steam\.exe|steamservice|steamwebhelper|vconsole2|valve)\b/i, "Valve Corp."]
 ];
 
 function resolvePublisherCommonName(explicitPublisher?: string | null, appName?: string | null, exePath?: string | null): string {
     if (explicitPublisher && typeof explicitPublisher === "string" && explicitPublisher.trim().length > 0) {
         return explicitPublisher.trim();
     }
-    const combined = `${appName || ""} ${exePath || ""}`.trim();
+    const questPath = formatQuestExecutablePath(exePath);
+    if (questPath && REAL_PE_PROFILES[questPath]) {
+        return REAL_PE_PROFILES[questPath].publisherCn;
+    }
+    const cleanExePath = (exePath || "").replace(/^.*?(?:steamapps[\\/]common[\\/]|epic games[\\/])/i, "");
+    const combined = `${appName || ""} ${cleanExePath || exePath || ""}`.trim();
     for (const [pattern, publisherCn] of KNOWN_PUBLISHERS) {
         if (pattern.test(combined)) {
             return publisherCn;
@@ -1671,7 +1677,33 @@ const VALORANT_ACES_TITLES = [
 
 const VALORANT_ACES_BADGES = ["Bronze", "Silver", "Gold"] as const;
 
-const VALORANT_ACES_LEADERBOARD_SCORES: Readonly<Record<string, number>> = {
+const VALORANT_ACES_TOP2_PLUS_1_SCORES: Readonly<Record<string, number>> = {
+    "ace-1": 24368,
+    "ace-2": 24379,
+    "ace-3": 24545,
+    "ace-4": 24540,
+    "ace-5": 24457,
+    "ace-6": 23344,
+    "ace-7": 23630,
+    "ace-8": 23838,
+    "ace-9": 23058,
+    "ace-10": 22423
+};
+
+const VALORANT_ACES_LEGIT_PRO_SCORES: Readonly<Record<string, number>> = {
+    "ace-1": 22340,
+    "ace-2": 22185,
+    "ace-3": 22410,
+    "ace-4": 22290,
+    "ace-5": 22120,
+    "ace-6": 21980,
+    "ace-7": 22050,
+    "ace-8": 22160,
+    "ace-9": 21910,
+    "ace-10": 21840
+};
+
+const VALORANT_ACES_BOARD_CEILINGS: Readonly<Record<string, number>> = {
     "ace-1": 25766,
     "ace-2": 25766,
     "ace-3": 25766,
@@ -1684,6 +1716,26 @@ const VALORANT_ACES_LEADERBOARD_SCORES: Readonly<Record<string, number>> = {
     "ace-10": 23748
 };
 
+function getConfiguredScoreSettings(): { scoreMode: string; customScore: number } {
+    const scoreMode = String((settings.store as any).activityScoreMode || "top1_plus_1");
+    const customScore = Number((settings.store as any).activityCustomScore) || 24500;
+    return { scoreMode, customScore };
+}
+
+function resolveRendererBoardScores(scoreMode: string, customScore: number): Record<string, number> {
+    if (scoreMode === "quest_only") return {};
+    if (scoreMode === "legit_pro") return { ...VALORANT_ACES_LEGIT_PRO_SCORES };
+    if (scoreMode === "custom") {
+        const out: Record<string, number> = {};
+        const raw = Math.round(Number(customScore) || 24500);
+        for (const [board, ceiling] of Object.entries(VALORANT_ACES_BOARD_CEILINGS)) {
+            out[board] = Math.max(1000, Math.min(ceiling - 1, raw));
+        }
+        return out;
+    }
+    return { ...VALORANT_ACES_TOP2_PLUS_1_SCORES };
+}
+
 function getActivityNativeHelper(): any {
     return (VencordNative as any)?.pluginHelpers?.CompleteDiscordQuest ??
         (VencordNative as any)?.pluginHelpers?.DiscordStealthGuard;
@@ -1691,30 +1743,39 @@ function getActivityNativeHelper(): any {
 
 function broadcastQuestCompletedToActivityFrames(applicationId?: string | null): number {
     const appIdStr = String(applicationId || VALORANT_ACES_APP_ID);
+    const isValorantAces = appIdStr === VALORANT_ACES_APP_ID;
     const frames = findActivityIframes(applicationId);
+    const { scoreMode, customScore } = getConfiguredScoreSettings();
+    const nativeHelper = getActivityNativeHelper();
+    const hasNativeSync = typeof nativeHelper?.syncActivityMaxRecords === "function";
+    const fallbackScores = resolveRendererBoardScores(scoreMode, customScore);
+
     let sent = 0;
     for (const iframe of frames) {
         try {
             const win = iframe?.contentWindow;
             if (win) {
-                for (const titleId of VALORANT_ACES_TITLES) {
-                    win.postMessage({ type: "award-title", payload: titleId }, "*");
-                }
-                for (const rank of VALORANT_ACES_BADGES) {
-                    win.postMessage({ type: "award-badge", payload: rank }, "*");
-                }
-                for (const [leaderboardId, score] of Object.entries(VALORANT_ACES_LEADERBOARD_SCORES)) {
-                    win.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+                if (isValorantAces) {
+                    for (const titleId of VALORANT_ACES_TITLES) {
+                        win.postMessage({ type: "award-title", payload: titleId }, "*");
+                    }
+                    for (const rank of VALORANT_ACES_BADGES) {
+                        win.postMessage({ type: "award-badge", payload: rank }, "*");
+                    }
+                    if (!hasNativeSync && scoreMode !== "quest_only") {
+                        for (const [leaderboardId, score] of Object.entries(fallbackScores)) {
+                            win.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+                        }
+                    }
                 }
                 win.postMessage({ type: "quest-completed" }, "*");
                 sent++;
             }
         } catch {}
     }
-    if (sent > 0 || appIdStr === VALORANT_ACES_APP_ID) {
+    if (isValorantAces && frames.length > 0 && hasNativeSync) {
         try {
-            const nativeHelper = getActivityNativeHelper();
-            nativeHelper?.syncActivityMaxRecords?.(appIdStr)?.catch?.(() => null);
+            nativeHelper.syncActivityMaxRecords(appIdStr, scoreMode, customScore)?.catch?.(() => null);
         } catch {}
     }
     return sent;
@@ -1729,18 +1790,23 @@ function installActivityFrameSyncLoop() {
             const frames = findActivityIframes(VALORANT_ACES_APP_ID);
             if (frames.length === 0) return;
             let needsFullBroadcast = false;
+            let needsPcSync = false;
             for (const iframe of frames) {
                 const count = syncedActivityIframeCounts.get(iframe) ?? 0;
-                syncedActivityIframeCounts.set(iframe, count + 1);
-                if (count < 6) {
+                if (count < 4) {
+                    syncedActivityIframeCounts.set(iframe, count + 1);
                     needsFullBroadcast = true;
+                } else if (!pcSyncedActivityIframes.has(iframe) && count < 15) {
+                    syncedActivityIframeCounts.set(iframe, count + 1);
+                    needsPcSync = true;
                 }
             }
             if (needsFullBroadcast) {
                 broadcastQuestCompletedToActivityFrames(VALORANT_ACES_APP_ID);
-            } else {
+            } else if (needsPcSync) {
+                const { scoreMode, customScore } = getConfiguredScoreSettings();
                 const nativeHelper = getActivityNativeHelper();
-                nativeHelper?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID)
+                nativeHelper?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID, scoreMode, customScore)
                     ?.then?.((res: any) => {
                         if (res?.pcSyncedFrames > 0) {
                             for (const iframe of frames) {
@@ -1880,25 +1946,28 @@ async function tryCompleteAchievementActivityHeadless(
     target = 1
 ): Promise<boolean> {
     try {
+        const { scoreMode, customScore } = getConfiguredScoreSettings();
         const nativeHelper = getActivityNativeHelper();
+        const oauthCode = await obtainActivityOAuthCode(applicationId);
+        if (!oauthCode) return false;
 
         if (typeof nativeHelper?.completeActivityQuest === "function") {
-            const code = await obtainActivityOAuthCode(applicationId);
-            if (code) {
-                const nativeRes = await nativeHelper.completeActivityQuest(
-                    String(applicationId),
-                    String(questId),
-                    code,
-                    target
-                ).catch(() => null);
-                if (nativeRes?.ok) {
-                    return true;
-                }
+            const nativeRes = await nativeHelper.completeActivityQuest(
+                String(applicationId),
+                String(questId),
+                oauthCode,
+                target,
+                scoreMode,
+                customScore
+            ).catch(() => null);
+            if (nativeRes?.ok) {
+                return true;
+            }
+            // If main-process HTTP ran and got an explicit status (e.g. 404 on non-Arise activity), do not re-run in renderer
+            if (nativeRes && nativeRes.step && nativeRes.step !== "exception") {
+                return false;
             }
         }
-
-        const rendererCode = await obtainActivityOAuthCode(applicationId);
-        if (!rendererCode) return false;
 
         const baseOrigin = `https://${applicationId}.discordsays.com`;
         const buildHeaders = (token = "", extra: Record<string, string> = {}) => ({
@@ -1915,7 +1984,7 @@ async function tryCompleteAchievementActivityHeadless(
         const authRes = await fetch(`${baseOrigin}/.proxy/acf/authorize`, {
             method: "POST",
             headers: buildHeaders(""),
-            body: JSON.stringify({ code: rendererCode, activityId: String(applicationId) })
+            body: JSON.stringify({ code: oauthCode, activityId: String(applicationId) })
         });
         if (!authRes.ok) return false;
         const authData: any = await authRes.json().catch(() => null);
@@ -1934,36 +2003,43 @@ async function tryCompleteAchievementActivityHeadless(
             }
         } catch {}
 
-        await Promise.allSettled([
-            ...VALORANT_ACES_TITLES.map(id => {
-                const body = JSON.stringify({ id });
-                return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
-                    method: "POST",
-                    headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                    body
-                });
-            }),
-            ...VALORANT_ACES_BADGES.map(rank => {
-                const body = JSON.stringify({ rank });
-                return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
-                    method: "POST",
-                    headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                    body
-                });
-            }),
-            ...Object.entries(VALORANT_ACES_LEADERBOARD_SCORES).map(([board, score]) => {
-                const body = JSON.stringify({ score });
-                return fetch(`${baseOrigin}/.proxy/api/leaderboards/${board}/submit`, {
-                    method: "POST",
-                    headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
-                    body
-                });
-            }),
+        const isValorantAces = String(applicationId) === VALORANT_ACES_APP_ID;
+        const rewardRequests: Promise<Response>[] = [
             fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
                 method: "POST",
                 headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
             })
-        ]);
+        ];
+        if (isValorantAces) {
+            const targetBoardScores = resolveRendererBoardScores(scoreMode, customScore);
+            rewardRequests.push(
+                ...VALORANT_ACES_TITLES.map(id => {
+                    const body = JSON.stringify({ id });
+                    return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
+                        method: "POST",
+                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                        body
+                    });
+                }),
+                ...VALORANT_ACES_BADGES.map(rank => {
+                    const body = JSON.stringify({ rank });
+                    return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, {
+                        method: "POST",
+                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                        body
+                    });
+                }),
+                ...Object.entries(targetBoardScores).map(([board, score]) => {
+                    const body = JSON.stringify({ score });
+                    return fetch(`${baseOrigin}/.proxy/api/leaderboards/${board}/submit`, {
+                        method: "POST",
+                        headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }),
+                        body
+                    });
+                })
+            );
+        }
+        await Promise.allSettled(rewardRequests);
 
         const progRes = await fetch(`${baseOrigin}/.proxy/acf/quest/progress`, {
             method: "POST",
