@@ -1301,6 +1301,52 @@ export default definePlugin({
         }
     },
 
+    installActivityMaxRecordsWatcher() {
+        const VALORANT_ACES_APP_ID = "1536318183873454090";
+        const TITLES = [
+            "chronicle-ace", "crashies-ace", "f0rsaken-ace", "tenz-ace", "jawgemo-ace",
+            "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"
+        ];
+        const BADGES = ["Bronze", "Silver", "Gold"];
+        const SCORES: Record<string, number> = {
+            "ace-1": 25766, "ace-2": 25766, "ace-3": 25766, "ace-4": 25766, "ace-5": 25766,
+            "ace-6": 25766, "ace-7": 25137, "ace-8": 25137, "ace-9": 25766, "ace-10": 23748
+        };
+        const postedCounts = new WeakMap<HTMLIFrameElement, number>();
+
+        const tick = () => {
+            try {
+                const iframes = Array.from(document.querySelectorAll("iframe")).filter(f => {
+                    const src = String(f?.src || f?.getAttribute("src") || "");
+                    return src.includes(`${VALORANT_ACES_APP_ID}.discordsays.com`);
+                });
+                if (iframes.length === 0) return;
+
+                for (const iframe of iframes) {
+                    const c = postedCounts.get(iframe) ?? 0;
+                    postedCounts.set(iframe, c + 1);
+                    if (c < 4) {
+                        const win = iframe?.contentWindow;
+                        if (win) {
+                            for (const t of TITLES) win.postMessage({ type: "award-title", payload: t }, "*");
+                            for (const b of BADGES) win.postMessage({ type: "award-badge", payload: b }, "*");
+                            for (const [leaderboardId, score] of Object.entries(SCORES)) {
+                                win.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
+                            }
+                            win.postMessage({ type: "quest-completed" }, "*");
+                        }
+                    }
+                }
+
+                Native?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID)?.catch?.(() => null);
+            } catch { }
+        };
+
+        tick();
+        const intervalId = window.setInterval(tick, 1800);
+        cleanupCallbacks.push(() => window.clearInterval(intervalId));
+    },
+
     async start() {
         if ((window as any).__OVERLAY__ || window.name === "DISCORD_OutOfProcessOverlay" || location.pathname.startsWith("/overlay")) return;
 
@@ -1310,6 +1356,7 @@ export default definePlugin({
         this.scrubLiveSuperProperties();
         this.installRunningGameStoreHooks();
         this.installRestApiQuestGuards();
+        this.installActivityMaxRecordsWatcher();
         setTimeout(() => {
             this.ensureQuestSealedMetadata();
         }, 3000);

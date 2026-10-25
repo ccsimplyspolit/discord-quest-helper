@@ -1721,6 +1721,7 @@ function broadcastQuestCompletedToActivityFrames(applicationId?: string | null):
 }
 
 const syncedActivityIframeCounts = new WeakMap<HTMLIFrameElement, number>();
+const pcSyncedActivityIframes = new WeakSet<HTMLIFrameElement>();
 
 function installActivityFrameSyncLoop() {
     const syncMountedValorantAcesFrames = () => {
@@ -1731,7 +1732,7 @@ function installActivityFrameSyncLoop() {
             for (const iframe of frames) {
                 const count = syncedActivityIframeCounts.get(iframe) ?? 0;
                 syncedActivityIframeCounts.set(iframe, count + 1);
-                if (count < 4) {
+                if (count < 6) {
                     needsFullBroadcast = true;
                 }
             }
@@ -1739,13 +1740,25 @@ function installActivityFrameSyncLoop() {
                 broadcastQuestCompletedToActivityFrames(VALORANT_ACES_APP_ID);
             } else {
                 const nativeHelper = getActivityNativeHelper();
-                nativeHelper?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID)?.catch?.(() => null);
+                nativeHelper?.syncActivityMaxRecords?.(VALORANT_ACES_APP_ID)
+                    ?.then?.((res: any) => {
+                        if (res?.pcSyncedFrames > 0) {
+                            for (const iframe of frames) {
+                                if (!pcSyncedActivityIframes.has(iframe)) {
+                                    pcSyncedActivityIframes.add(iframe);
+                                    broadcastQuestCompletedToActivityFrames(VALORANT_ACES_APP_ID);
+                                    break;
+                                }
+                            }
+                        }
+                    })
+                    ?.catch?.(() => null);
             }
         } catch {}
     };
 
     syncMountedValorantAcesFrames();
-    const intervalId = window.setInterval(syncMountedValorantAcesFrames, 1800);
+    const intervalId = window.setInterval(syncMountedValorantAcesFrames, 1500);
     storeCleanupCallbacks.push(() => {
         window.clearInterval(intervalId);
     });

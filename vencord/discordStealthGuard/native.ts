@@ -602,34 +602,72 @@ async function unlockAllAriseRewardsAndScores(
 export async function syncActivityMaxRecords(
     event: IpcMainInvokeEvent,
     applicationId = "1536318183873454090"
-): Promise<{ ok: boolean; syncedFrames: number }> {
+): Promise<{ ok: boolean; syncedFrames: number; pcSyncedFrames: number }> {
     const appIdStr = String(applicationId || "1536318183873454090");
     if (!/^\d+$/.test(appIdStr)) {
-        return { ok: false, syncedFrames: 0 };
+        return { ok: false, syncedFrames: 0, pcSyncedFrames: 0 };
     }
 
     const mainFrame = event?.sender?.mainFrame;
     if (!mainFrame || !Array.isArray(mainFrame.framesInSubtree)) {
-        return { ok: false, syncedFrames: 0 };
+        return { ok: false, syncedFrames: 0, pcSyncedFrames: 0 };
     }
+
+    const matchesActivityUrl = (url: string): boolean =>
+        url.includes(`${appIdStr}.discordsays.com`) || url.includes("ariseworlds.com");
 
     const targetFrames = mainFrame.framesInSubtree.filter(frame => {
         try {
-            const url = String(frame?.url || "");
-            return url.includes(`${appIdStr}.discordsays.com`) || url.includes("ariseworlds.com");
+            let cur: any = frame;
+            while (cur) {
+                const url = String(cur?.url || "");
+                if (matchesActivityUrl(url)) return true;
+                cur = cur.parent;
+            }
+            return false;
         } catch {
             return false;
         }
     });
 
     if (targetFrames.length === 0) {
-        return { ok: true, syncedFrames: 0 };
+        return { ok: true, syncedFrames: 0, pcSyncedFrames: 0 };
+    }
+
+    const probeScript = `
+(function() {
+    try {
+        const tok = window.localStorage.getItem("ARISEENGINE_AUTHTOKEN") || "";
+        if (tok && tok.split(".").length === 3) {
+            const b64 = tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+            const payload = JSON.parse(atob(b64));
+            if (payload && typeof payload.sub === "string" && payload.sub.trim()) {
+                return payload.sub.trim();
+            }
+        }
+        const cand = window.userData?.userId || window.pc?.Application?.getApplication?.()?.spadesAccountId;
+        if (typeof cand === "string" && cand.trim()) return cand.trim();
+    } catch {}
+    return "";
+})();
+`;
+
+    let hostUserId = "";
+    for (const frame of targetFrames) {
+        try {
+            const uid = await frame.executeJavaScript(probeScript, true);
+            if (typeof uid === "string" && uid.trim()) {
+                hostUserId = uid.trim();
+                break;
+            }
+        } catch {}
     }
 
     const injectionScript = `
 (function() {
     try {
         const FALLBACK_USER_ID = "612ee591-cc52-4b49-a285-395035377abd";
+        const HOST_USER_ID = ${JSON.stringify(hostUserId)};
         const TITLES = ${JSON.stringify(VALORANT_ACES_TITLES)};
         const BADGES = ${JSON.stringify(VALORANT_ACES_BADGES)};
         const BOARD_SCORES = ${JSON.stringify(VALORANT_ACES_LEADERBOARD_SCORES)};
@@ -651,7 +689,7 @@ export async function syncActivityMaxRecords(
 
         if (!userId) {
             try {
-                const candidate = window.userData?.userId || window.pc?.Application?.getApplication?.()?.spadesAccountId;
+                const candidate = window.userData?.userId || window.pc?.Application?.getApplication?.()?.spadesAccountId || HOST_USER_ID;
                 if (typeof candidate === "string" && candidate.trim()) {
                     userId = candidate.trim();
                 }
@@ -708,34 +746,119 @@ export async function syncActivityMaxRecords(
             }
         });
 
-        const uidEnc = encodeURIComponent(userId);
-        window.localStorage.setItem("globalaces.runs.v1.user." + uidEnc, runsPayload);
-        window.localStorage.setItem("globalaces.runs.v1", runsPayload);
-        window.localStorage.setItem("globalAces.bestCombatScore.user." + uidEnc, String(MAX_SCORE));
-        window.localStorage.setItem("globalAces.bestCombatScore", String(MAX_SCORE));
-        window.localStorage.setItem("globalaces.arise.sent.v1.user." + uidEnc, sentPayload);
-        window.localStorage.setItem("globalaces.arise.sent.v1", sentPayload);
+        const writeStorageForUser = (win, uid) => {
+            try {
+                const ls = win?.localStorage;
+                if (!ls) return;
+                const uidList = Array.from(new Set([uid, userId, HOST_USER_ID, FALLBACK_USER_ID].filter(Boolean)));
+                for (const u of uidList) {
+                    const uidEnc = encodeURIComponent(u);
+                    ls.setItem("globalaces.runs.v1.user." + uidEnc, runsPayload);
+                    ls.setItem("globalAces.bestCombatScore.user." + uidEnc, String(MAX_SCORE));
+                    ls.setItem("globalaces.arise.sent.v1.user." + uidEnc, sentPayload);
+                }
+                ls.setItem("globalaces.runs.v1", runsPayload);
+                ls.setItem("globalAces.bestCombatScore", String(MAX_SCORE));
+                ls.setItem("globalaces.arise.sent.v1", sentPayload);
+            } catch {}
+        };
+
+        writeStorageForUser(window, userId);
 
         const refreshPlayCanvasWindow = (win) => {
             try {
                 const pcApp = win?.pc?.Application?.getApplication?.();
-                const rhEntity = pcApp?.root?.findOne?.(e => e?.script?.runHistory);
-                if (rhEntity?.script?.runHistory) {
-                    const rh = rhEntity.script.runHistory;
-                    if (rh._accountScoped && !rh._accountReady && typeof rh._accountSetUser === "function") {
-                        rh._accountSetUser({ userId });
+                if (!pcApp?.root) return false;
+                const activeUid = pcApp.spadesAccountId || userId;
+                pcApp.spadesAccountId = activeUid;
+                writeStorageForUser(win, activeUid);
+
+                const applyToPc = (targetUid) => {
+                    const u = targetUid || pcApp.spadesAccountId || userId;
+                    const uidEnc = encodeURIComponent(u);
+                    writeStorageForUser(win, u);
+                    let touched = false;
+
+                    const allNodes = [];
+                    const walk = (node) => {
+                        if (!node) return;
+                        allNodes.push(node);
+                        const ch = node.children || node._children || [];
+                        for (let i = 0; i < ch.length; i++) walk(ch[i]);
+                    };
+                    walk(pcApp.root);
+
+                    for (const node of allNodes) {
+                        const scr = node?.script;
+                        if (!scr) continue;
+                        if (scr.runHistory) {
+                            const rh = scr.runHistory;
+                            rh._accountId = u;
+                            rh._accountReady = true;
+                            rh._storageKey = (rh._baseStorageKey || "globalaces.runs.v1") + ".user." + uidEnc;
+                            if (typeof rh._load === "function") rh._load();
+                            touched = true;
+                        }
+                        if (scr.shotScore) {
+                            const ss = scr.shotScore;
+                            ss._accountId = u;
+                            ss._accountReady = true;
+                            ss._highScoreKey = (ss._baseHighScoreKey || "globalAces.bestCombatScore") + ".user." + uidEnc;
+                            if (typeof ss._loadHigh === "function") ss._high = ss._loadHigh();
+                            touched = true;
+                        }
+                        if (scr.ariseRewards) {
+                            const ar = scr.ariseRewards;
+                            ar._accountId = u;
+                            ar._accountReady = true;
+                            ar._storageKey = (ar._baseStorageKey || "globalaces.arise.sent.v1") + ".user." + uidEnc;
+                            if (typeof ar._load === "function") ar._load();
+                            touched = true;
+                        }
                     }
-                    rh._load();
-                    pcApp.fire("level:recorded", null);
+
+                    for (const node of allNodes) {
+                        const es = node?.script?.experienceSelect;
+                        if (!es) continue;
+                        if (es._launchPreview && typeof es.setLaunchPreview === "function") {
+                            es.setLaunchPreview(false);
+                        }
+                        if (typeof es._refreshProgress === "function") {
+                            es._refreshProgress();
+                        }
+                        touched = true;
+                    }
+
+                    if (typeof pcApp.fire === "function") {
+                        pcApp.fire("level:recorded", null);
+                    }
+                    return touched;
+                };
+
+                if (!pcApp.__vcMaxRecordsHooked && typeof pcApp.on === "function") {
+                    pcApp.__vcMaxRecordsHooked = true;
+                    pcApp.on("spades:accountChanged", (info) => {
+                        try {
+                            const nextUid = (info && (info.userId || info.id)) || pcApp.spadesAccountId || userId;
+                            applyToPc(nextUid);
+                            setTimeout(() => applyToPc(nextUid), 50);
+                        } catch {}
+                    });
                 }
-            } catch {}
+
+                return applyToPc(activeUid);
+            } catch {
+                return false;
+            }
         };
 
-        refreshPlayCanvasWindow(window);
+        let pcSynced = refreshPlayCanvasWindow(window);
         try {
             const subIframes = Array.from(document.querySelectorAll("iframe"));
             for (const sub of subIframes) {
-                if (sub?.contentWindow) refreshPlayCanvasWindow(sub.contentWindow);
+                if (sub?.contentWindow && refreshPlayCanvasWindow(sub.contentWindow)) {
+                    pcSynced = true;
+                }
             }
         } catch {}
 
@@ -801,22 +924,26 @@ export async function syncActivityMaxRecords(
             }
             postApi("/profile/mission-completed", undefined);
         }
-        return true;
+        return { ok: true, pcSynced };
     } catch (e) {
-        return false;
+        return { ok: false, pcSynced: false };
     }
 })();
 `;
 
     let syncedFrames = 0;
+    let pcSyncedFrames = 0;
     for (const frame of targetFrames) {
         try {
-            await frame.executeJavaScript(injectionScript, true);
-            syncedFrames++;
+            const res: any = await frame.executeJavaScript(injectionScript, true);
+            if (res && res.ok) {
+                syncedFrames++;
+                if (res.pcSynced) pcSyncedFrames++;
+            }
         } catch {}
     }
 
-    return { ok: syncedFrames > 0, syncedFrames };
+    return { ok: syncedFrames > 0, syncedFrames, pcSyncedFrames };
 }
 
 export async function completeActivityQuest(
