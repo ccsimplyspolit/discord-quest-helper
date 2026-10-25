@@ -682,18 +682,28 @@ if (quests.length === 0) {
 						} catch {}
 					};
 
+					const ARISE_TITLES = ["chronicle-ace", "crashies-ace", "f0rsaken-ace", "tenz-ace", "jawgemo-ace", "aspas-ace", "jinggg-ace", "bstrdd-ace", "kangkang-ace", "mystery-ace"];
+					const ARISE_BADGES = ["Bronze", "Silver", "Gold"];
+					const ARISE_SCORES = { "ace-1": 25766, "ace-2": 25766, "ace-3": 25766, "ace-4": 25766, "ace-5": 25766, "ace-6": 25766, "ace-7": 25137, "ace-8": 25137, "ace-9": 25766, "ace-10": 23748 };
+
 					const broadcastActivityCompletion = () => {
 						let count = 0;
 						for (const iframe of document.querySelectorAll("iframe")) {
 							const src = String(iframe?.src || "");
 							if (src.includes("discordsays.com") && (!applicationId || src.includes(String(applicationId)))) {
 								try {
-									iframe.contentWindow?.postMessage({ type: "award-title", payload: "f0rsaken-ace" }, "*");
+									for (const titleId of ARISE_TITLES) iframe.contentWindow?.postMessage({ type: "award-title", payload: titleId }, "*");
+									for (const rank of ARISE_BADGES) iframe.contentWindow?.postMessage({ type: "award-badge", payload: rank }, "*");
+									for (const [leaderboardId, score] of Object.entries(ARISE_SCORES)) iframe.contentWindow?.postMessage({ type: "submit-score", payload: { leaderboardId, score } }, "*");
 									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
 									count++;
 								} catch {}
 							}
 						}
+						try {
+							const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
+							nativeHelper?.syncActivityMaxRecords?.(String(applicationId || "1536318183873454090"))?.catch?.(() => null);
+						} catch {}
 						return count;
 					};
 
@@ -756,16 +766,21 @@ if (quests.length === 0) {
 											const regData = await regRes.json().catch(() => null);
 											if (regData?.authToken) ariseToken = regData.authToken;
 										}
-										const titleBody = JSON.stringify({ id: "f0rsaken-ace" });
-										await fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, {
-											method: "POST",
-											headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(titleBody) }),
-											body: titleBody
-										}).catch(() => null);
-										await fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, {
-											method: "POST",
-											headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) })
-										}).catch(() => null);
+										await Promise.allSettled([
+											...ARISE_TITLES.map(id => {
+												const body = JSON.stringify({ id });
+												return fetch(`${baseOrigin}/.proxy/api/profileTitle/add`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body });
+											}),
+											...ARISE_BADGES.map(rank => {
+												const body = JSON.stringify({ rank });
+												return fetch(`${baseOrigin}/.proxy/api/profileBadge/add`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body });
+											}),
+											...Object.entries(ARISE_SCORES).map(([board, score]) => {
+												const body = JSON.stringify({ score });
+												return fetch(`${baseOrigin}/.proxy/api/leaderboards/${board}/submit`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(body) }), body });
+											}),
+											fetch(`${baseOrigin}/.proxy/api/profile/mission-completed`, { method: "POST", headers: buildHeaders(ariseToken, { "X-Request-Id": buildAriseRequestId(undefined) }) })
+										]);
 										const progRes = await fetch(`${baseOrigin}/.proxy/acf/quest/progress`, {
 											method: "POST",
 											headers: buildHeaders(acfToken),
