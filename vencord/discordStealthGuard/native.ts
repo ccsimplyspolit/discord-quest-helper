@@ -262,20 +262,27 @@ function buildExecutableFingerprintBuffer(
                     if (buf.readUInt16LE(0) === 0x5a4d) {
                         const e_lfanew = buf.readInt32LE(0x3c);
                         if (e_lfanew > 0 && e_lfanew + 0x108 <= readLen && buf.readUInt32LE(e_lfanew) === 0x00004550) {
-                            fileSize = BigInt(stat.size);
                             const numSections = buf.readUInt16LE(e_lfanew + 6);
-                            timeDateStamp = buf.readUInt32LE(e_lfanew + 8);
+                            const tds = buf.readUInt32LE(e_lfanew + 8);
                             const sizeOfOpt = buf.readUInt16LE(e_lfanew + 0x14);
                             const magic = buf.readUInt16LE(e_lfanew + 0x18);
-                            sizeOfImage = buf.readUInt32LE(e_lfanew + 0x50);
-                            isPe64 = magic === 0x020b;
-
-                            const hdrEnd = Math.min(readLen, e_lfanew + 0x18 + sizeOfOpt);
-                            hdrSha256 = sha256(buf.subarray(0, hdrEnd));
-
+                            const soi = buf.readUInt32LE(e_lfanew + 0x50);
                             const secStart = e_lfanew + 0x18 + sizeOfOpt;
                             const secEnd = secStart + numSections * 40;
-                            if (secEnd <= readLen) {
+                            if (
+                                magic === 0x020b &&
+                                numSections > 0 &&
+                                tds !== 0 &&
+                                soi >= 0x1000 &&
+                                (soi & 0xfff) === 0 &&
+                                secStart <= readLen &&
+                                secEnd <= readLen
+                            ) {
+                                fileSize = BigInt(stat.size);
+                                timeDateStamp = tds;
+                                sizeOfImage = soi;
+                                isPe64 = true;
+                                hdrSha256 = sha256(buf.subarray(0, secStart));
                                 secSha256 = sha256(buf.subarray(secStart, secEnd));
                             }
                         }
@@ -293,6 +300,7 @@ function buildExecutableFingerprintBuffer(
         fileSize = profile.fileSize;
         timeDateStamp = profile.timeDateStamp;
         sizeOfImage = profile.sizeOfImage;
+        isPe64 = true;
         hdrSha256 = Buffer.from(profile.hdrSha256, "hex");
         secSha256 = Buffer.from(profile.secSha256, "hex");
     }
