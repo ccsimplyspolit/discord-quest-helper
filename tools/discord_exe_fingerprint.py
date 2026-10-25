@@ -100,11 +100,11 @@ REAL_PE_PROFILES: dict[str, dict] = {
     },
     "win64/vconsole2.exe": {
         "publisher_cn": "Valve Corp.",
-        "file_size": 4901016,
-        "time_date_stamp": 1760055276,
-        "size_of_image": 5709824,
-        "hdr_sha256": "cda2926ecca1eb1b53a0b1421c1969b461d08748d900c2e7c1fda332086c3556",
-        "sec_sha256": "5ae151258e7abe392da4ecef7855e6a51c1d9422a88b6ccd352f50835458e743",
+        "file_size": 5137560,
+        "time_date_stamp": 1791254866,
+        "size_of_image": 6017024,
+        "hdr_sha256": "f498b04ef723de1b746d5a8ffabdc2ef017a4d13acb669ab4b764836c1818bad",
+        "sec_sha256": "c9a39e259c2bdf10c2cf2e27a57aeea9ad318d1c6492e6949d85c532c6c9e485",
     },
     "steam/steam.exe": {
         "publisher_cn": "Valve Corp.",
