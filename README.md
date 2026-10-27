@@ -2,7 +2,7 @@
 
 > **Full Reverse-Engineering Audit (`discord_utils.node` `sub_a3990` / `sub_a4120` / `sub_a3f60` / `sub_1350` & `libdiscore-wasm`) + Stealth-Hardened Console Script, Vencord Plugins, and Python Fingerprint CLI**
 
-[![Gist Console Script](https://img.shields.io/badge/Gist-CompleteDiscordQuest.md-blue?logo=github)](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)
+[![Console Script Guide](https://img.shields.io/badge/Console_Guide-CompleteDiscordQuest.md-blue?logo=github)](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
 [![Vencord PR #28](https://img.shields.io/badge/Vencord_Plugin-PR_%2328-success?logo=github)](https://github.com/nicola02nb/completeDiscordQuest/pull/28)
 [![Tauri/Rust PR #218](https://img.shields.io/badge/Tauri_Desktop_Helper-PR_%23218-orange?logo=rust)](https://github.com/Masterain98/discord-quest-helper/pull/218)
 
@@ -64,7 +64,7 @@ Finally, `sub_116790` Base64-encodes the 146-byte buffer into a **196-character 
 | Path | Description |
 | :--- | :--- |
 | **[`console/CompleteDiscordQuest.js`](./console/CompleteDiscordQuest.js)** | Ready-to-paste DevTools Console script with WebCrypto `sub_1350` `executableFingerprint` synthesis, `launch_signature` 12-bit scrubber, `Error.prepareStackTrace` cloaking, `metadata_sealed` auto-backfill, `ACHIEVEMENT_IN_ACTIVITY` support, and multi-platform reward auto-claim (`PC -> PS5 -> Xbox -> Switch`). |
-| **[`console/CompleteDiscordQuest.md`](./console/CompleteDiscordQuest.md)** | Full Markdown guide & FAQ for the standalone Console script (synced with [Gist `f323e1b626dff79bfc08b24bc3dc27bd`](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)). |
+| **[`console/CompleteDiscordQuest.md`](./console/CompleteDiscordQuest.md)** | Full Markdown guide & FAQ for the standalone Console script (standalone DevTools Console guide and FAQ). |
 | **[`vencord/completeDiscordQuest/`](./vencord/completeDiscordQuest/)** | Stealth-hardened Vencord userplugin for automatic background Quest enrollment, completion, and multi-platform reward claiming. |
 | **[`vencord/discordStealthGuard/`](./vencord/discordStealthGuard/)** | Companion Vencord userplugin providing global `launch_signature` bit-scrubbing, native `RunningGameStore` fingerprint synthesis/harvesting, and `/quests/*` payload sanitization. |
 | **[`tools/discord_exe_fingerprint.py`](./tools/discord_exe_fingerprint.py)** | Bit-for-bit Python 3 port of `sub_a3990`, `sub_a4120` (Win32 `WinVerifyTrust` + `CryptHashPublicKeyInfo`), `sub_a3f60`, and `sub_1350` for extracting, synthesizing, and decrypting 196-char `executableFingerprint` tokens. |
@@ -73,7 +73,7 @@ Finally, `sub_116790` Base64-encodes the 146-byte buffer into a **196-character 
 ### Option 1: Standalone DevTools Console Script (Zero Install)
 1. Open the **Discord Desktop App** and accept a quest (or let the script auto-enroll & complete).
 2. Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> to open DevTools -> **Console** tab.
-3. Copy the contents of **[`console/CompleteDiscordQuest.js`](./console/CompleteDiscordQuest.js)** (or from **[Gist `f323e1b626dff79bfc08b24bc3dc27bd`](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)**), paste into Console, and press <kbd>Enter</kbd>.
+3. Copy the contents of **[`console/CompleteDiscordQuest.js`](./console/CompleteDiscordQuest.js)** (see **[`console/CompleteDiscordQuest.md`](./console/CompleteDiscordQuest.md)** for full setup steps), paste into Console, and press <kbd>Enter</kbd>.
 
 ### Option 2: Vencord Userplugins (`completeDiscordQuest` + `discordStealthGuard`)
 1. Copy `vencord/completeDiscordQuest` and `vencord/discordStealthGuard` into your Vencord `src/userplugins/` directory:
@@ -99,8 +99,8 @@ python tools/discord_exe_fingerprint.py --decrypt "<196-char-base64>" --user-id 
 
 ## Ecosystem & Upstream Pull Requests
 
-- **Standalone Console Script & Full Audit Gist:** [`ccsimplyspolit/CompleteDiscordQuest.md`](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)
-- **Vencord Plugin Upstream PR & Fork:** [`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28) ([`ccsimplyspolit/completeDiscordQuest`](https://github.com/ccsimplyspolit/completeDiscordQuest))
+- **Standalone Console Script & Full Audit Guide:** [`console/CompleteDiscordQuest.md`](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
+- **Vencord Plugin Upstream PR & Fork:** [`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28) ([`ccsimplyspolit/discord-quest-helper` (`vencord/completeDiscordQuest`)](https://github.com/ccsimplyspolit/discord-quest-helper/tree/main/vencord/completeDiscordQuest))
 - **Desktop Tauri / Rust Helper Upstream PR & Fork:** [`Masterain98/discord-quest-helper#218`](https://github.com/Masterain98/discord-quest-helper/pull/218) ([`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper))
 
 ---

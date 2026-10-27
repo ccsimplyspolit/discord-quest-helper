@@ -10,7 +10,7 @@
 >
 > See [`SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md`](./SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md) for the complete IDA / binary reverse-engineering report and applied stealth mitigations.
 >
-> **Flagship Suite (Console Script, Vencord Plugins, Python CLI & Full IDA Write-up):** [`ccsimplyspolit/discord-quest-stealth`](https://github.com/ccsimplyspolit/discord-quest-stealth)
+> **Flagship Suite (Console Script, Vencord Plugins, Python CLI & Full IDA Write-up):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper)
 
 # CompleteDiscordQuest for Vencord (Stealth Hardened)
 
@@ -20,7 +20,7 @@ A Vencord(VC) plugin that completes multiple Discord quests in background simult
 
 ## Credits:
 
-This is a porting for BetterDiscord of a [snippet](https://gist.github.com/aamiaa/204cd9d42013ded9faf646fae7f89fbb) made by [aamiaa](https://github.com/aamiaa) ([Stealth Patched Fork](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)).
+This is a porting for BetterDiscord of a [snippet](https://gist.github.com/aamiaa/204cd9d42013ded9faf646fae7f89fbb) made by [aamiaa](https://github.com/aamiaa) ([Stealth Patched Fork](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)).
 
 ## Features:
 

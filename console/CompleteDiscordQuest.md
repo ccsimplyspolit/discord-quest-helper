@@ -12,9 +12,9 @@
 > See [`SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md`](./SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md) in this Gist for the full IDA / binary reverse-engineering breakdown. The script below has been patched with full stealth mitigations.
 >
 > **Related Implementations & Repositories (by [@ccsimplyspolit](https://github.com/ccsimplyspolit)):**
-> - **Flagship Repository (Console Script, Vencord Plugins & Python CLI — Star for updates):** [`ccsimplyspolit/discord-quest-stealth`](https://github.com/ccsimplyspolit/discord-quest-stealth)
-> - **Console Script Gist (Star for updates):** [`ccsimplyspolit/CompleteDiscordQuest.md`](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)
-> - **Vencord Plugin (Stealth-Hardened Fork & PR):** [`ccsimplyspolit/completeDiscordQuest`](https://github.com/ccsimplyspolit/completeDiscordQuest) ([`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28))
+> - **Flagship Repository (Console Script, Vencord Plugins & Python CLI — Star for updates):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper)
+> - **Standalone Console Script Guide:** [`console/CompleteDiscordQuest.md`](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
+> - **Vencord Plugin (Stealth-Hardened Fork & PR):** [`ccsimplyspolit/discord-quest-helper` (`vencord/completeDiscordQuest`)](https://github.com/ccsimplyspolit/discord-quest-helper/tree/main/vencord/completeDiscordQuest) ([`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28))
 > - **Desktop App (Tauri/Rust Stealth Fork & PR):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper) ([`Masterain98/discord-quest-helper#218`](https://github.com/Masterain98/discord-quest-helper/pull/218))
 
 ## Complete Recent Discord Quest (Stealth Patched Edition)

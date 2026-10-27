@@ -7,7 +7,7 @@ Through static and dynamic reverse engineering of the Windows Discord Desktop cl
 - **`libdiscore-wasm`** (Rust/WASM telemetry & client-modification detector)
 - **`discord_web_bundle.js`** (Webpack modules `396813`, `378187`, `973522`, `952818`, `499785`, `174459`, `70298`)
 
-we identified the exact client-side and server-side detection vectors that cause Discord to issue **`Quest Activity Notice`** warnings and suspend Quest access when users run:
+I identified the exact client-side and server-side detection vectors that cause Discord to issue **`Quest Activity Notice`** warnings and suspend Quest access when users run:
 1. **`aamiaa/CompleteDiscordQuest.md`** (DevTools Console script)
 2. **`nicola02nb/completeDiscordQuest`** (Vencord / BetterDiscord plugin)
 3. **`Masterain98/discord-quest-helper`** (Tauri + Rust + CDP + dummy PE runner)
@@ -159,9 +159,9 @@ Every API request includes `X-Super-Properties` (Base64 JSON). Inside `libdiscor
 
 ## 6. Reference Implementations & Patches
 
-- **Flagship Repository (Console Script, Vencord Plugins, Python CLI & Full IDA Write-up):** [`ccsimplyspolit/discord-quest-stealth`](https://github.com/ccsimplyspolit/discord-quest-stealth)
-- **Standalone Console Script & Full Audit Gist:** [`ccsimplyspolit/CompleteDiscordQuest.md`](https://gist.github.com/ccsimplyspolit/f323e1b626dff79bfc08b24bc3dc27bd)
-- **Vencord Plugin Implementation:** [`ccsimplyspolit/completeDiscordQuest`](https://github.com/ccsimplyspolit/completeDiscordQuest) (Upstream PR: [`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28))
+- **Flagship Repository (Console Script, Vencord Plugins, Python CLI & Full IDA Write-up):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper)
+- **Standalone Console Script & Full Audit Guide:** [`console/CompleteDiscordQuest.md`](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
+- **Vencord Plugin Implementation:** [`ccsimplyspolit/discord-quest-helper` (`vencord/completeDiscordQuest`)](https://github.com/ccsimplyspolit/discord-quest-helper/tree/main/vencord/completeDiscordQuest) (Upstream PR: [`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28))
 - **Rust / Tauri / CDP Implementation:** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper) (Upstream PR: [`Masterain98/discord-quest-helper#218`](https://github.com/Masterain98/discord-quest-helper/pull/218))
 - **Author & Security Research Portfolio:** [`@ccsimplyspolit`](https://github.com/ccsimplyspolit)
 
