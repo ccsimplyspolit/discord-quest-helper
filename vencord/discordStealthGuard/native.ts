@@ -64,11 +64,11 @@ function getInstalledDiskModules(): Record<string, { version: number; searchPath
                 const targetDir = path.join(searchPath, name);
                 const candidateDirs = [targetDir, searchPath];
                 let isValid = false;
-                for (const candidateDirsItem of candidateDirs) {
+                for (const candidate of candidateDirs) {
                     if (
-                        fs.existsSync(path.join(candidateDirsItem, "index.js")) ||
-                        fs.existsSync(path.join(candidateDirsItem, `${name}.node`)) ||
-                        fs.existsSync(path.join(candidateDirsItem, "package.json"))
+                        fs.existsSync(path.join(candidate, "index.js")) ||
+                        fs.existsSync(path.join(candidate, `${name}.node`)) ||
+                        fs.existsSync(path.join(candidate, "package.json"))
                     ) {
                         isValid = true;
                         break;
