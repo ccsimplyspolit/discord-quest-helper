@@ -785,7 +785,8 @@ export default definePlugin({
                     replace: "$1=$self.cleanLaunchSignatureUuid($2)"
                 },
                 {
-                    match: /launch_signature:(\i)(?!\.)/g,
+                    match: /launch_signature:([A-Za-z_$][\w$]*)\b(?!\s*[\.\[])/g,
+                    noWarn: true,
                     replace: "launch_signature:$self.cleanLaunchSignatureUuid($1)"
                 }
             ]

@@ -1081,7 +1081,7 @@ export default definePlugin({
             find: "extendSuperProperties({launch_signature:",
             noWarn: true,
             replacement: {
-                match: /launch_signature:(\i)(?!\.)/g,
+                match: /launch_signature:([A-Za-z_$][\w$]*)\b(?!\s*[\.\[])/g,
                 replace: "launch_signature:$self.scrubLaunchSignature($1)"
             }
         },

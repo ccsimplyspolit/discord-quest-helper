@@ -19,6 +19,55 @@ const LOG_PREFIX = "[StealthGuard:Main]";
 
 const hookedObjects = new WeakSet<object>();
 
+function isModuleAlreadyInstalled(name?: string): boolean {
+    if (!name || typeof name !== "string") return false;
+    try {
+        const path = require("path");
+        const fs = require("fs");
+        let currentAppDir: string | null = null;
+        if (typeof process.execPath === "string") {
+            const dir = path.dirname(process.execPath);
+            if (path.basename(dir).startsWith("app-")) {
+                currentAppDir = dir;
+            }
+        }
+        if (!currentAppDir) {
+            const localAppData = process.env.LOCALAPPDATA;
+            if (!localAppData) return false;
+            const discordRoot = path.join(localAppData, "Discord");
+            if (!fs.existsSync(discordRoot)) return false;
+            const appDirs = fs.readdirSync(discordRoot)
+                .filter((d: string) => d.startsWith("app-"))
+                .sort((a: string, b: string) => b.localeCompare(a, undefined, { numeric: true }));
+            if (appDirs.length > 0) {
+                currentAppDir = path.join(discordRoot, appDirs[0]);
+            }
+        }
+        if (!currentAppDir) return false;
+
+        const modDir = path.join(currentAppDir, "modules");
+        if (!fs.existsSync(modDir)) return false;
+
+        const subdirs = fs.readdirSync(modDir);
+        for (const sub of subdirs) {
+            if (sub.startsWith(`${name}-`) || sub === name) {
+                const targetModDir = path.join(modDir, sub);
+                const candidateDirs = [targetModDir, path.join(targetModDir, name)];
+                for (const candidate of candidateDirs) {
+                    if (
+                        fs.existsSync(path.join(candidate, "index.js")) ||
+                        fs.existsSync(path.join(candidate, `${name}.node`)) ||
+                        fs.existsSync(path.join(candidate, "package.json"))
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+    } catch {}
+    return false;
+}
+
 // ============================================================================
 // MAIN PROCESS HOOK: Block Discord Host & Module Auto-Updates via Module._load
 // ============================================================================
@@ -54,7 +103,7 @@ function installMainProcessUpdaterAndStealthHooks() {
                                     (typeof detail === "object" && detail !== null && (
                                         "UpdateToLatest" in detail ||
                                         "Repair" in detail ||
-                                        "InstallModule" in detail
+                                        ("InstallModule" in detail && isModuleAlreadyInstalled(detail.InstallModule?.name))
                                     ));
 
                                 if (isUpdateCmd && this._interceptedHandler) {

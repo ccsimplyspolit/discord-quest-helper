@@ -6,7 +6,8 @@ webpackChunkdiscord_app.pop();
 let ApplicationStreamingStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getStreamerActiveStreamMetadata)?.exports?.A;
 let RunningGameStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getRunningGames)?.exports?.Ay;
 let QuestsStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuest)?.exports?.A;
-let AdDeliveryStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuestAdDecisionByQuestId)?.exports?.A;
+let AdDeliveryStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getQuestAdDecisionByQuestId || x?.exports?.A?.__proto__?.deliveryAdDecisionByPlacement)?.exports?.A
+	?? Object.values(wpRequire.c).find(x => x?.exports?.Ay?.deliveryAdDecisionByPlacement || x?.exports?.default?.deliveryAdDecisionByPlacement)?.exports?.Ay;
 let ChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.A?.__proto__?.getAllThreadsForParent)?.exports?.A;
 let GuildChannelStore = Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getSFWDefaultChannel)?.exports?.Ay;
 let FluxDispatcher = Object.values(wpRequire.c).find(x => x?.exports?.h?.__proto__?.flushWaitQueue)?.exports?.h;
@@ -51,6 +52,16 @@ function getSealedQuestMetadata(questId) {
 			metadataSealed = metadataSealed ?? decision.ad_decision_data?.metadata_sealed ?? decision.metadata_sealed ?? decision.traffic_metadata_sealed;
 			trafficMetadataRaw = trafficMetadataRaw ?? decision.traffic_metadata_raw;
 			trafficMetadataSealed = trafficMetadataSealed ?? decision.traffic_metadata_sealed ?? decision.ad_decision_data?.traffic_metadata_sealed;
+		} else if (AdDeliveryStore?.deliveryAdDecisionByPlacement) {
+			const placementDecisions = AdDeliveryStore.deliveryAdDecisionByPlacement;
+			for (const item of (placementDecisions?.values ? placementDecisions.values() : [])) {
+				if (item?.adDecisionData?.quest_id === questId || !questId) {
+					metadataSealed = metadataSealed ?? item.metadataSealed ?? item.trafficMetadataSealed ?? item.adDecisionData?.metadata_sealed;
+					trafficMetadataRaw = trafficMetadataRaw ?? item.trafficMetadataRaw ?? item.adDecisionData?.traffic_metadata_raw;
+					trafficMetadataSealed = trafficMetadataSealed ?? item.trafficMetadataSealed ?? item.adDecisionData?.traffic_metadata_sealed;
+					if (metadataSealed) break;
+				}
+			}
 		}
 	} catch {}
 	return { metadataSealed, trafficMetadataRaw, trafficMetadataSealed };
