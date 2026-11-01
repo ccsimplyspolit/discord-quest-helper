@@ -1,3 +1,4 @@
+(async () => {
 delete window.$;
 let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
 webpackChunkdiscord_app.pop();
@@ -113,9 +114,9 @@ function cloakFunction(fn, originalFn, fallbackName = "") {
 	}
 })();
 
-// 2. Scrub the 12 client-mod / DevTools detection bits [0,19,27,36,43,52,66,72,79,89,103,116] from X-Super-Properties launch_signature
+// 2. Scrub the exact 12 client-mod detection bits [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116] from X-Super-Properties launch_signature (preserving Bit 0 random entropy)
 (() => {
-	const MOD_BITS = [0, 8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
+	const MOD_BITS = [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
 	function scrubLaunchSignatureUuid(uuid) {
 		if (typeof uuid !== "string" || uuid.length !== 36) return uuid;
 		const hex = uuid.replace(/-/g, "");
@@ -479,16 +480,20 @@ async function sendCustomWebhook(opts) {
 				{ name: "Skipped", value: String(queueStats.skipped), inline: true }
 			);
 		}
+		const embed = {
+			title: renderedTitle.slice(0, 256),
+			description: renderedContent.slice(0, 4096),
+			color: embedColor,
+			timestamp: isoTimestamp,
+			fields,
+			footer: { text: `ID: ${eventId}` }
+		};
+		if (opts.rewardImage && /^https:\/\//i.test(opts.rewardImage)) {
+			embed.thumbnail = { url: opts.rewardImage };
+		}
 		payload = {
 			content: renderedContent.slice(0, 2000),
-			embeds: [{
-				title: renderedTitle.slice(0, 256),
-				description: renderedContent.slice(0, 4096),
-				color: embedColor,
-				timestamp: isoTimestamp,
-				fields,
-				footer: { text: `ID: ${eventId}` }
-			}],
+			embeds: [embed],
 			allowed_mentions: { parse: [] }
 		};
 	} else {
@@ -563,8 +568,28 @@ const isApp = typeof DiscordNative !== "undefined";
 let nextObserverId = 1;
 const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 
-(async () => {
+	const initialUserId = UserStore?.getCurrentUser?.()?.id;
+	let isTerminated = false;
+	const onAuthChange = () => {
+		const currentUser = UserStore?.getCurrentUser?.();
+		if (!currentUser || (initialUserId && currentUser.id !== initialUserId)) {
+			console.log("[CompleteDiscordQuest] User session changed or logged out, terminating quest queue.");
+			isTerminated = true;
+		}
+	};
+	try {
+		FluxDispatcher?.subscribe?.("LOGOUT", onAuthChange);
+		FluxDispatcher?.subscribe?.("CURRENT_USER_UPDATE", onAuthChange);
+	} catch {}
+	const cleanupAuthListeners = () => {
+		try {
+			FluxDispatcher?.unsubscribe?.("LOGOUT", onAuthChange);
+			FluxDispatcher?.unsubscribe?.("CURRENT_USER_UPDATE", onAuthChange);
+		} catch {}
+	};
+
 	if (!QuestsStore?.quests) {
+		cleanupAuthListeners();
 		console.log("QuestsStore not found!");
 		return;
 	}
@@ -590,13 +615,19 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 	let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
 
 	if (quests.length === 0) {
+		cleanupAuthListeners();
 		console.log("You don't have any uncompleted quests!");
 		return;
 	}
 
 	let doJob = function () {
+		if (isTerminated) {
+			cleanupAuthListeners();
+			return;
+		}
 		const quest = quests.pop();
 		if (!quest) {
+			cleanupAuthListeners();
 			notifyQuestEvent("queue_completed", null, undefined, undefined, queueStats);
 			console.log(`All quests finished! Succeeded: ${queueStats.succeeded}, Failed: ${queueStats.failed}, Skipped: ${queueStats.skipped}`);
 			return;
@@ -633,7 +664,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 						const isFinalStep = timestamp >= secondsNeeded;
 						const jitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
 						const reportedTs = isFinalStep
-							? Number((secondsNeeded + 0.015 + Math.random() * 0.045).toFixed(3))
+							? secondsNeeded
 							: Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
 						const res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: reportedTs } });
 						completed = res.body?.completed_at != null;
@@ -647,8 +678,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
 				}
 				if (!completed) {
-					const finalTs = Number((secondsNeeded + 0.018 + Math.random() * 0.032).toFixed(3));
-					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: finalTs } });
+					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } });
 				}
 				console.log("Quest completed!");
 				queueStats.succeeded++;
@@ -712,7 +742,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					}, rawGetGameForPID, "getGameForPID");
 					FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [], added: [fakeGame], games: mergeFakeGames() });
 
-					let fn = data => {
+					let fn = async data => {
 						if (data.questId && data.questId !== quest.id) return;
 						let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
 						console.log(`Quest progress: ${progress}/${secondsNeeded}`);
@@ -792,8 +822,9 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 				console.log("Remember that you need at least 1 other person to be in the vc!");
 			}
 		} else if (taskName === "PLAY_ACTIVITY" || taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME") {
-			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x != null && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id ?? "1";
-			const streamKey = `call:${channelId}:1`;
+			const channelId = ChannelStore?.getSortedPrivateChannels?.()?.[0]?.id
+				?? (Object.values(GuildChannelStore?.getAllGuilds?.() ?? {})).find(x => x != null && Array.isArray(x?.VOCAL) && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id
+				?? "1";
 			const isAchievementTask = taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME";
 
 			let fn = async () => {
@@ -1171,11 +1202,10 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					}
 
 					while (true) {
+						if (isTerminated) break;
 						if (isAchievementTask) broadcastActivityCompletion();
-						const isStreamTask = taskName === "STREAM_ON_DESKTOP";
 						const body = { terminal: false };
 						if (applicationId) body.application_id = applicationId;
-						if (isStreamTask) body.stream_key = streamKey;
 						let res;
 						try {
 							res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body });
@@ -1198,7 +1228,6 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 						if (progress >= secondsNeeded || res?.body?.completed_at != null) {
 							const termBody = { terminal: true };
 							if (applicationId) termBody.application_id = applicationId;
-							if (isStreamTask) termBody.stream_key = streamKey;
 							try {
 								await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body: termBody });
 							} catch {}

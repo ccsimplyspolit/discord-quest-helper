@@ -42,6 +42,15 @@ const cachedBadgeStats: AccountBadgeStats = {
 let lastBadgeFetchAt = 0;
 let cachedUserId = "";
 
+export function clearCachedBadgeStats(): void {
+    cachedUserId = "";
+    lastBadgeFetchAt = 0;
+    cachedBadgeStats.questsCompleted = null;
+    cachedBadgeStats.gamesPlayed = null;
+    cachedBadgeStats.hoursPlayed = null;
+    cachedBadgeStats.orbsBalance = null;
+}
+
 function parseBadgeMetric(badge: UserBadge | undefined, unit: string | null): number | null {
     if (!badge) return null;
     const progress = Array.isArray(badge.progress)

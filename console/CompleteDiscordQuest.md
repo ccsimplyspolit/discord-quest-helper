@@ -1,36 +1,18 @@
-> [!CAUTION]
-> As of August 26th 2026, Discord has started suspending quest access of people caught automating quest completion (`Quest Activity Notice`).
-> 
-> <img width="1091" height="238" alt="image" src="https://gist.github.com/user-attachments/assets/98474d24-3985-4986-b0f3-09fa254f4cf6" />
-> 
-> **Why the original snippet gets flagged (Reverse-Engineered Root Causes):**
-> 1. **Missing `executableFingerprint` (`discord_utils.node` `sub_a3990` -> `sub_a4120` -> `sub_a3f60` -> `sub_1350`):** When spoofing `RunningGameStore.getRunningGames`, the original `fakeGame` object omits `executableFingerprint` (the 196-character Base64-encoded 146-byte (`0x92`) binary struct containing un-XORed `version = 0x01`, `flags = 0x03` (`is_signed | is_pe64`), `file_size`, PE `time_date_stamp`, page-aligned `size_of_image`, `pe_headers_sha256` `[0x12..0x31]`, `hw_sha256` `[0x32..0x51]` from `SHA256(MachineGuid || userId)`, `sections_sha256` `[0x52..0x71]`, and `cert_sha256` `[0x72..0x91]` from `SHA256(UTF8(Publisher_CN) || SPKI_SHA256)`, with bytes `1..145` XORed against `SHA256(userId + "https://discord.com/careers")`). Consequently, `Module 396813` (`ea(e)`) sends `executable_fingerprint: undefined` on `POST /quests/{id}/heartbeat`.
-> 2. **Destructive `RunningGameStore` replacement & incomplete 22-key schema:** Replacing `getRunningGames()` with `[fakeGame]` drops all real running games simultaneously in `RUNNING_GAMES_CHANGE` and omits 11 of the 22 native process observer properties (`nativeProcessObserverId`, `elevated`, `sandboxed`, `lastFocused`, `windowHandle`, `fullscreenType`, `origGameName`, `distributor`, `sku`, `gameMetadata`, `executableFingerprint`).
-> 3. **Client-Mod & Console `launch_signature` Bits (`libdiscore-wasm`) + `Error().stack` Leak (`Module 499785`):** `delete window.$` runs *after* `generateLaunchSignature()` has already set Bit 0 (`window.$`) or Bit 43 (`window.Vencord`) in the 128-bit `launch_signature` UUID inside `X-Super-Properties`. In addition, `HTTPWithAnalytics.post` (`Module 499785`) records `Error().stack` in `network_action_quest_heartbeat.stack_trace`, leaking `<anonymous>:` / `vencord://` frames.
-> 4. **Integer `timestamp` on final `WATCH_VIDEO` request & unaligned `PLAY_ACTIVITY` payload:** Sending an exact integer `timestamp: secondsNeeded` on the final video progress call or omitting `{ application_id, terminal }` on `PLAY_ACTIVITY` heartbeats diverges from genuine client telemetry.
->
-> See [`SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md`](./SECURITY_AUDIT_AND_REVERSE_ANALYSIS.md) in this Gist for the full IDA / binary reverse-engineering breakdown. The script below has been patched with full stealth mitigations.
->
-> **Related Implementations & Repositories (by [@ccsimplyspolit](https://github.com/ccsimplyspolit)):**
-> - **Flagship Repository (Console Script, Vencord Plugins & Python CLI — Star for updates):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper)
-> - **Standalone Console Script Guide:** [`console/CompleteDiscordQuest.md`](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
-> - **Vencord Plugin (Stealth-Hardened Fork & PR):** [`ccsimplyspolit/discord-quest-helper` (`vencord/completeDiscordQuest`)](https://github.com/ccsimplyspolit/discord-quest-helper/tree/main/vencord/completeDiscordQuest) ([`nicola02nb/completeDiscordQuest#28`](https://github.com/nicola02nb/completeDiscordQuest/pull/28))
-> - **Desktop App (Tauri/Rust Stealth Fork & PR):** [`ccsimplyspolit/discord-quest-helper`](https://github.com/ccsimplyspolit/discord-quest-helper) ([`Masterain98/discord-quest-helper#218`](https://github.com/Masterain98/discord-quest-helper/pull/218))
+# Complete Recent Discord Quest (Stealth Edition)
 
-## Complete Recent Discord Quest (Stealth Patched Edition)
+Automatically enrolls in, progresses, and claims Discord Quests directly from the Discord Console with natural pacing, cooldown simulation, and optional webhook notifications.
 
-> [!NOTE]
-> This does not work in browser for quests which require you to play a game! Use the [desktop app](https://discord.com/download) to complete those.
+## How to Use This Script
 
-How to use this script:
-1. Accept a quest under the Quests tab
-2. Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> to open DevTools
-3. Go to the `Console` tab
-4. Paste the following code and hit enter:
+1. Accept a quest under the Quests tab (or let the script auto-enroll eligible quests).
+2. Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd> to open DevTools.
+3. Go to the Console tab.
+4. Paste the following script and press Enter:
 <details>
 	<summary>Click to expand</summary>
 	
 ```js
+(async () => {
 delete window.$;
 let wpRequire = webpackChunkdiscord_app.push([[Symbol()], {}, r => r]);
 webpackChunkdiscord_app.pop();
@@ -146,9 +128,9 @@ function cloakFunction(fn, originalFn, fallbackName = "") {
 	}
 })();
 
-// 2. Scrub the 12 client-mod / DevTools detection bits [0,19,27,36,43,52,66,72,79,89,103,116] from X-Super-Properties launch_signature
+// 2. Scrub the exact 12 client-mod detection bits [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116] from X-Super-Properties launch_signature (preserving Bit 0 random entropy)
 (() => {
-	const MOD_BITS = [0, 8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
+	const MOD_BITS = [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
 	function scrubLaunchSignatureUuid(uuid) {
 		if (typeof uuid !== "string" || uuid.length !== 36) return uuid;
 		const hex = uuid.replace(/-/g, "");
@@ -512,16 +494,20 @@ async function sendCustomWebhook(opts) {
 				{ name: "Skipped", value: String(queueStats.skipped), inline: true }
 			);
 		}
+		const embed = {
+			title: renderedTitle.slice(0, 256),
+			description: renderedContent.slice(0, 4096),
+			color: embedColor,
+			timestamp: isoTimestamp,
+			fields,
+			footer: { text: `ID: ${eventId}` }
+		};
+		if (opts.rewardImage && /^https:\/\//i.test(opts.rewardImage)) {
+			embed.thumbnail = { url: opts.rewardImage };
+		}
 		payload = {
 			content: renderedContent.slice(0, 2000),
-			embeds: [{
-				title: renderedTitle.slice(0, 256),
-				description: renderedContent.slice(0, 4096),
-				color: embedColor,
-				timestamp: isoTimestamp,
-				fields,
-				footer: { text: `ID: ${eventId}` }
-			}],
+			embeds: [embed],
 			allowed_mentions: { parse: [] }
 		};
 	} else {
@@ -596,8 +582,28 @@ const isApp = typeof DiscordNative !== "undefined";
 let nextObserverId = 1;
 const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 
-(async () => {
+	const initialUserId = UserStore?.getCurrentUser?.()?.id;
+	let isTerminated = false;
+	const onAuthChange = () => {
+		const currentUser = UserStore?.getCurrentUser?.();
+		if (!currentUser || (initialUserId && currentUser.id !== initialUserId)) {
+			console.log("[CompleteDiscordQuest] User session changed or logged out, terminating quest queue.");
+			isTerminated = true;
+		}
+	};
+	try {
+		FluxDispatcher?.subscribe?.("LOGOUT", onAuthChange);
+		FluxDispatcher?.subscribe?.("CURRENT_USER_UPDATE", onAuthChange);
+	} catch {}
+	const cleanupAuthListeners = () => {
+		try {
+			FluxDispatcher?.unsubscribe?.("LOGOUT", onAuthChange);
+			FluxDispatcher?.unsubscribe?.("CURRENT_USER_UPDATE", onAuthChange);
+		} catch {}
+	};
+
 	if (!QuestsStore?.quests) {
+		cleanupAuthListeners();
 		console.log("QuestsStore not found!");
 		return;
 	}
@@ -623,13 +629,19 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 	let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
 
 	if (quests.length === 0) {
+		cleanupAuthListeners();
 		console.log("You don't have any uncompleted quests!");
 		return;
 	}
 
 	let doJob = function () {
+		if (isTerminated) {
+			cleanupAuthListeners();
+			return;
+		}
 		const quest = quests.pop();
 		if (!quest) {
+			cleanupAuthListeners();
 			notifyQuestEvent("queue_completed", null, undefined, undefined, queueStats);
 			console.log(`All quests finished! Succeeded: ${queueStats.succeeded}, Failed: ${queueStats.failed}, Skipped: ${queueStats.skipped}`);
 			return;
@@ -666,7 +678,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 						const isFinalStep = timestamp >= secondsNeeded;
 						const jitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
 						const reportedTs = isFinalStep
-							? Number((secondsNeeded + 0.015 + Math.random() * 0.045).toFixed(3))
+							? secondsNeeded
 							: Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
 						const res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: reportedTs } });
 						completed = res.body?.completed_at != null;
@@ -680,8 +692,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
 				}
 				if (!completed) {
-					const finalTs = Number((secondsNeeded + 0.018 + Math.random() * 0.032).toFixed(3));
-					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: finalTs } });
+					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } });
 				}
 				console.log("Quest completed!");
 				queueStats.succeeded++;
@@ -745,7 +756,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					}, rawGetGameForPID, "getGameForPID");
 					FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [], added: [fakeGame], games: mergeFakeGames() });
 
-					let fn = data => {
+					let fn = async data => {
 						if (data.questId && data.questId !== quest.id) return;
 						let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
 						console.log(`Quest progress: ${progress}/${secondsNeeded}`);
@@ -825,8 +836,9 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 				console.log("Remember that you need at least 1 other person to be in the vc!");
 			}
 		} else if (taskName === "PLAY_ACTIVITY" || taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME") {
-			const channelId = ChannelStore.getSortedPrivateChannels()[0]?.id ?? Object.values(GuildChannelStore.getAllGuilds()).find(x => x != null && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id ?? "1";
-			const streamKey = `call:${channelId}:1`;
+			const channelId = ChannelStore?.getSortedPrivateChannels?.()?.[0]?.id
+				?? (Object.values(GuildChannelStore?.getAllGuilds?.() ?? {})).find(x => x != null && Array.isArray(x?.VOCAL) && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id
+				?? "1";
 			const isAchievementTask = taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME";
 
 			let fn = async () => {
@@ -1204,11 +1216,10 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					}
 
 					while (true) {
+						if (isTerminated) break;
 						if (isAchievementTask) broadcastActivityCompletion();
-						const isStreamTask = taskName === "STREAM_ON_DESKTOP";
 						const body = { terminal: false };
 						if (applicationId) body.application_id = applicationId;
-						if (isStreamTask) body.stream_key = streamKey;
 						let res;
 						try {
 							res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body });
@@ -1231,7 +1242,6 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 						if (progress >= secondsNeeded || res?.body?.completed_at != null) {
 							const termBody = { terminal: true };
 							if (applicationId) termBody.application_id = applicationId;
-							if (isStreamTask) termBody.stream_key = streamKey;
 							try {
 								await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body: termBody });
 							} catch {}

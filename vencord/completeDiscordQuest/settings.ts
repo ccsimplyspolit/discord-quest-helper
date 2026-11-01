@@ -9,6 +9,8 @@ import { Button } from "@components/Button";
 import { OptionType } from "@utils/types";
 import { React, showToast } from "@webpack/common";
 
+import { sendRendererWebhookNotification } from "./webhook";
+
 let keepAliveSettingChangedHandler: ((enabled: boolean) => void) | null = null;
 let skipKeepAliveHandler: (() => number) | null = null;
 
@@ -293,13 +295,7 @@ const settings = definePluginSettings({
                         return;
                     }
                     const nativeHelper = (VencordNative as any)?.pluginHelpers?.CompleteDiscordQuest;
-                    if (typeof nativeHelper?.sendCustomWebhookNotification !== "function") {
-                        try {
-                            showToast({ text: "External notification test is only available in the desktop app.", variant: "critical" });
-                        } catch {}
-                        return;
-                    }
-                    const res = await nativeHelper.sendCustomWebhookNotification({
+                    const webhookParams = {
                         url,
                         bearerToken: String(settings.store.webhookBearerToken || ""),
                         format: (settings.store.webhookFormat as any) || "auto",
@@ -309,7 +305,19 @@ const settings = definePluginSettings({
                         questName: "Sample Quest",
                         templateTitle: settings.store.webhookTemplateTitle,
                         templateContent: settings.store.webhookTemplateContent
-                    }).catch(() => ({ ok: false, message: "Delivery failed" }));
+                    };
+                    let res: { ok: boolean; message?: string } | null = null;
+                    if (typeof nativeHelper?.sendCustomWebhookNotification === "function") {
+                        res = await nativeHelper.sendCustomWebhookNotification(webhookParams).catch((err: any) => ({
+                            ok: false,
+                            message: err?.message || "Delivery failed"
+                        }));
+                    } else {
+                        res = await sendRendererWebhookNotification(webhookParams).catch((err: any) => ({
+                            ok: false,
+                            message: err?.message || "Delivery failed"
+                        }));
+                    }
                     try {
                         showToast({
                             text: res?.ok

@@ -9,9 +9,10 @@ import definePlugin from "@utils/types";
 import { filters, find, findByCodeLazy, findByPropsLazy, waitFor } from "@webpack";
 import { FluxDispatcher, RestAPI, showToast } from "@webpack/common";
 
-import { QuestButton, QuestsCount } from "./components/QuestButton";
+import { clearCachedBadgeStats, QuestButton, QuestsCount } from "./components/QuestButton";
 import settings, { registerKeepAliveSettingChangedHandler, registerSkipKeepAliveHandler } from "./settings";
 import { AdDeliveryStore, ChannelStore, GuildChannelStore, QuestsStore, RunningGameStore, SuperPropertiesStore, UserStore } from "./stores";
+import { sendRendererWebhookNotification } from "./webhook";
 
 const QuestApplyAction = findByCodeLazy("type:\"QUESTS_ENROLL_BEGIN\"") as (questId: string, action: QuestAction) => Promise<any>;
 const QuestClaimAction = findByCodeLazy("type:\"QUESTS_CLAIM_REWARD_BEGIN\"") as (questId: string, platform: number, location: number) => Promise<any>;
@@ -266,24 +267,29 @@ function notifyQuestEvent(
 
         if (shouldSendWebhook) {
             const nativeHelper = (VencordNative as any)?.pluginHelpers?.CompleteDiscordQuest;
+            const webhookPayload = {
+                url: webhookUrl,
+                bearerToken: String(settings.store.webhookBearerToken || ""),
+                format: (settings.store.webhookFormat as any) || "auto",
+                eventType,
+                locale: (typeof navigator !== "undefined" && navigator.language) || "en",
+                isTest: false,
+                questId: isQueueEvent ? undefined : questId,
+                questName: isQueueEvent ? undefined : questName,
+                taskType: isQueueEvent ? undefined : taskType,
+                estimatedCompleteAt: eventType === "quest_started" ? (estimatedCompleteAt || null) : null,
+                rewardImage: (!isQueueEvent && quest) ? (extractQuestRewardImageUrl(quest) || null) : null,
+                queue: queueStats,
+                templateTitle: settings.store.webhookTemplateTitle,
+                templateContent: settings.store.webhookTemplateContent
+            };
             if (typeof nativeHelper?.sendCustomWebhookNotification === "function") {
-                nativeHelper.sendCustomWebhookNotification({
-                    url: webhookUrl,
-                    bearerToken: String(settings.store.webhookBearerToken || ""),
-                    format: (settings.store.webhookFormat as any) || "auto",
-                    eventType,
-                    locale: (typeof navigator !== "undefined" && navigator.language) || "en",
-                    isTest: false,
-                    questId: isQueueEvent ? undefined : questId,
-                    questName: isQueueEvent ? undefined : questName,
-                    taskType: isQueueEvent ? undefined : taskType,
-                    estimatedCompleteAt: eventType === "quest_started" ? (estimatedCompleteAt || null) : null,
-                    rewardImage: (!isQueueEvent && quest) ? (extractQuestRewardImageUrl(quest) || null) : null,
-                    queue: queueStats,
-                    templateTitle: settings.store.webhookTemplateTitle,
-                    templateContent: settings.store.webhookTemplateContent
-                }).catch((err: any) => {
-                    console.warn("[CompleteDiscordQuest] Webhook notification failed:", err);
+                nativeHelper.sendCustomWebhookNotification(webhookPayload).catch((err: any) => {
+                    console.warn("[CompleteDiscordQuest] Native webhook notification failed:", err);
+                });
+            } else {
+                sendRendererWebhookNotification(webhookPayload).catch((err: any) => {
+                    console.warn("[CompleteDiscordQuest] Renderer webhook notification failed:", err);
                 });
             }
         }
@@ -1530,6 +1536,7 @@ function checkAndNotifyQueueCompletion() {
 
 function resetSessionQuestState() {
     clearEnrollBlockedWakeupTimer();
+    clearCachedBadgeStats();
     stopAllFarming();
     enrollingQuestIds.clear();
     failedEnrollQuestIds.clear();
@@ -2008,9 +2015,8 @@ function completeQuest(quest: QuestValue) {
                             if (diff >= speed || nextStep >= secondsNeeded) {
                                 const isFinalStep = nextStep >= secondsNeeded;
                                 const subSecJitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
-                                const finalFloatOffset = Number((0.015 + Math.random() * 0.045).toFixed(3));
                                 const sendTs = isFinalStep
-                                    ? Number((secondsNeeded + finalFloatOffset).toFixed(3))
+                                    ? secondsNeeded
                                     : Math.min(Number((secondsNeeded - 0.01).toFixed(3)), Number((nextStep + subSecJitter).toFixed(3)));
                                 try {
                                     completed = await sendVideoProgress(sendTs);
@@ -2032,15 +2038,14 @@ function completeQuest(quest: QuestValue) {
                             await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
                         }
                         if (!completed && completingQuest.get(quest.id)) {
-                            const finalCompletionTs = Number((secondsNeeded + 0.018 + Math.random() * 0.032).toFixed(3));
                             try {
-                                completed = await sendVideoProgress(finalCompletionTs);
+                                completed = await sendVideoProgress(secondsNeeded);
                             } catch (finalErr: any) {
                                 if (finalErr?.status === 429) {
                                     const retryMs = ((finalErr?.body?.retry_after as number) || 5) * 1000 + 500;
                                     await new Promise(resolve => setTimeout(resolve, retryMs));
                                     if (completingQuest.get(quest.id)) {
-                                        completed = await sendVideoProgress(finalCompletionTs);
+                                        completed = await sendVideoProgress(secondsNeeded);
                                     }
                                 }
                             }
@@ -2363,11 +2368,6 @@ function completeQuest(quest: QuestValue) {
             case "PLAY_ACTIVITY":
             case "ACHIEVEMENT_IN_ACTIVITY":
             case "ACHIEVEMENT_IN_GAME": {
-                const channelId = ChannelStore?.getSortedPrivateChannels?.()?.[0]?.id
-                    ?? (Object.values(GuildChannelStore?.getAllGuilds?.() ?? {}) as any[]).find(x => x != null && Array.isArray(x.VOCAL) && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id
-                    ?? "1";
-                const streamKey = `call:${channelId}:1`;
-
                 const runActivityQuest = async () => {
                     const restoreSiblings = isAchievementTask
                         ? deprioritizeCompletedSiblingQuests(quest.id, applicationId)
