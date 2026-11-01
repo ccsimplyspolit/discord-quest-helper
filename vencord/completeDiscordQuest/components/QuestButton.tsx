@@ -8,7 +8,7 @@ import "./QuestButton.css";
 
 import { Flex } from "@components/Flex";
 import { findByCodeLazy, findComponentByCodeLazy } from "@webpack";
-import { RestAPI, Tooltip, useEffect, useState } from "@webpack/common";
+import { NavigationRouter, RestAPI, Tooltip, useEffect, useState } from "@webpack/common";
 
 import settings from "../settings";
 import { QuestsStore, UserStore } from "../stores";
@@ -133,7 +133,17 @@ async function fetchAccountStats(): Promise<AccountBadgeStats> {
 
 const QuestIcon = findByCodeLazy("\"M7.5 21.7a8.95");
 const rawNavigateToQuestHome = findByCodeLazy(".QUEST_HOME,{search:");
-const navigateToQuestHome = () => rawNavigateToQuestHome?.({});
+const navigateToQuestHome = () => {
+    if (typeof rawNavigateToQuestHome === "function") {
+        try {
+            rawNavigateToQuestHome({});
+            return;
+        } catch {}
+    }
+    try {
+        NavigationRouter?.transitionTo?.("/quest-home");
+    } catch {}
+};
 const TopBarButton = findComponentByCodeLazy(".HEADER_BAR_BADGE_BOTTOM,", 'position:"bottom"');
 const SettingsBarButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
 const CountBadge = findComponentByCodeLazy("renderBadgeCount", "disableColor");
@@ -280,7 +290,7 @@ export function QuestButton({ type }: { type: "top-bar" | "settings-bar"; }) {
             <TopBarButton
                 className={className}
                 iconClassName={undefined}
-                disabled={navigateToQuestHome === undefined}
+                disabled={false}
                 showBadge={state.enrollable > 0 || state.enrolled > 0 || state.claimable > 0}
                 badgePosition={"bottom"}
                 icon={QuestIcon}
@@ -298,7 +308,7 @@ export function QuestButton({ type }: { type: "top-bar" | "settings-bar"; }) {
                 tooltipText={tooltip}
                 onContextMenu={undefined}
                 onClick={navigateToQuestHome}
-                disabled={navigateToQuestHome === undefined}
+                disabled={false}
                 icon={QuestIcon}
                 className={`quest-button ${className}`}
             >

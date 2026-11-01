@@ -29,6 +29,20 @@ let UserStore = Object.values(wpRequire.c).find(x => x?.exports?.default?.getCur
 let api = Object.values(wpRequire.c).find(x => x?.exports?.Bo?.get)?.exports?.Bo;
 let httpWithAnalytics = Object.values(wpRequire.c).find(x => x?.exports?.A?.post && x?.exports?.A?.get && x?.exports?.A !== api)?.exports?.A ?? api;
 let QuestClaimAction = Object.values(wpRequire.c).find(x => typeof x?.exports?.Oq === "function")?.exports?.Oq;
+if (!QuestClaimAction && typeof wpRequire === "function" && wpRequire.m) {
+	for (const id in wpRequire.m) {
+		const str = Function.prototype.toString.call(wpRequire.m[id]);
+		if (str.includes("QUESTS_CLAIM_REWARD_BEGIN") && (str.includes("/quests/decision") || str.includes("QUESTS_CLAIM_REWARD"))) {
+			try {
+				const mod = wpRequire(id);
+				if (typeof mod?.Oq === "function") {
+					QuestClaimAction = mod.Oq;
+					break;
+				}
+			} catch {}
+		}
+	}
+}
 
 // 0. Sealed Quest Metadata Backfill & Platform Priority Helper (Module 396813 / Module 710969 / Module 738822)
 const REWARD_PLATFORM_PRIORITY = [4, 2, 1, 3, 0]; // PC (4) -> PS5/PlayStation (2) -> Xbox (1) -> Switch (3) -> Cross-Platform (0)
@@ -581,18 +595,39 @@ const claimQuestReward = async (quest) => {
 				url: `/quests/${quest.id}/claim-reward`,
 				body: { platform, location: 1 }
 			});
+			const body = res?.body ?? {};
+			const claimedAt = body.claimed_at ?? body.claimedAt ?? new Date().toISOString();
+			const rawItems = Array.isArray(body.entitlements) ? body.entitlements : (Array.isArray(body.items) ? body.items : []);
+			const items = rawItems.map(it => ({
+				skuId: it?.sku_id ?? it?.skuId,
+				tenantMetadata: it?.tenant_metadata ?? it?.tenantMetadata ?? null,
+				consumed: Boolean(it?.consumed)
+			}));
+			const formattedEntitlements = {
+				claimedAt,
+				items,
+				errors: Array.isArray(body.errors) ? body.errors : []
+			};
 			try {
 				FluxDispatcher?.dispatch?.({
 					type: "QUESTS_CLAIM_REWARD_SUCCESS",
 					questId: quest.id,
-					entitlements: res?.body
+					entitlements: formattedEntitlements
 				});
 			} catch {}
+			res = formattedEntitlements;
+		}
+		const hasErrors = (Array.isArray(res?.errors) && res.errors.length > 0) ||
+			(Array.isArray(res?.body?.errors) && res.body.errors.length > 0) ||
+			Boolean(res?.captcha_key || res?.body?.captcha_key);
+		if (hasErrors) {
+			console.warn(`[CompleteDiscordQuest] Claim returned errors for ${quest.id}:`, JSON.stringify(res?.errors || res?.body || res || {}));
+			return;
 		}
 		console.log(`Claimed reward for ${quest.config?.messages?.questName || quest.id} (platform: ${platform})`);
 		notifyQuestEvent("reward_claimed", quest);
 		if (quest?.userStatus) {
-			quest.userStatus.claimedAt = res?.body?.user_status?.claimed_at ?? res?.body?.userStatus?.claimedAt ?? new Date().toISOString();
+			quest.userStatus.claimedAt = res?.claimedAt ?? res?.claimed_at ?? res?.body?.claimed_at ?? res?.body?.user_status?.claimed_at ?? res?.body?.userStatus?.claimedAt ?? new Date().toISOString();
 		}
 	} catch (err) {
 		console.warn(`Failed to claim reward for ${quest.id}:`, err?.message || err);
@@ -1432,6 +1467,7 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 	};
 	doJob();
 })();
+
 ```
 </details>
 
