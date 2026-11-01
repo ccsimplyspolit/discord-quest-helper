@@ -414,12 +414,12 @@ function normalizeUtcIso(raw) {
 	const ms = Date.parse(raw.trim());
 	return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
+const WEBHOOK_TEMPLATE_TOKEN_RE = /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}|\{([A-Za-z][A-Za-z0-9_-]*)\}/g;
 function renderWebhookTemplate(template, vars) {
 	if (typeof template !== "string" || !template) return "";
-	return template.replace(/\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g, (m, k) => {
-		if (m === "{{") return "{";
-		if (m === "}}") return "}";
-		return (k && k in vars) ? vars[k] : m;
+	return template.replace(WEBHOOK_TEMPLATE_TOKEN_RE, (match, escaped, key) => {
+		if (escaped) return `{${escaped}}`;
+		return (key && key in vars) ? (vars[key] ?? "") : match;
 	});
 }
 function isDiscordWebhookUrl(urlStr) {
@@ -614,22 +614,63 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 
 	let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
 
+	async function logAccountBadgeStats() {
+		try {
+			const client = httpWithAnalytics || api;
+			if (!client?.get) return;
+			const [badgesRes, balanceRes] = await Promise.allSettled([
+				client.get({ url: "/users/@me/badges" }),
+				client.get({ url: "/users/@me/virtual-currency/balance" })
+			]);
+			const parts = [];
+			if (badgesRes.status === "fulfilled") {
+				const badges = badgesRes.value?.body?.badges || badgesRes.value?.body;
+				if (Array.isArray(badges)) {
+					const qBadge = badges.find(b => b?.badge_id === 14);
+					if (qBadge && typeof qBadge.info_label === "string") {
+						const match = qBadge.info_label.match(/(\d+(?:[,\s]\d{3})*|\d+)/);
+						if (match) {
+							const count = Number(match[1].replace(/[,\s]/g, ""));
+							if (Number.isSafeInteger(count)) parts.push(`Quests Completed: ${count}`);
+						}
+					}
+					const gamesBadge = badges.find(b => b?.badge_id === 21);
+					const gamesCount = Array.isArray(gamesBadge?.progress) ? gamesBadge.progress.find(p => p?.unit === "games")?.current : null;
+					if (typeof gamesCount === "number") parts.push(`Games Played: ${gamesCount}`);
+					const hoursBadge = badges.find(b => b?.badge_id === 20);
+					const hoursCount = Array.isArray(hoursBadge?.progress) ? hoursBadge.progress.find(p => p?.unit === "hours")?.current : null;
+					if (typeof hoursCount === "number") parts.push(`Hours: ${hoursCount}`);
+				}
+			}
+			if (balanceRes.status === "fulfilled") {
+				const balance = balanceRes.value?.body?.balance;
+				if (typeof balance === "number") parts.push(`Orbs: ${balance}`);
+			}
+			if (parts.length > 0) {
+				console.log(`[CompleteDiscordQuest] Account Stats: ${parts.join(" | ")}`);
+			}
+		} catch {}
+	}
+
+	await logAccountBadgeStats();
+
 	if (quests.length === 0) {
 		cleanupAuthListeners();
 		console.log("You don't have any uncompleted quests!");
 		return;
 	}
 
-	let doJob = function () {
+	let doJob = async function () {
 		if (isTerminated) {
 			cleanupAuthListeners();
 			return;
 		}
-		const quest = quests.pop();
+		const quest = quests.shift();
 		if (!quest) {
 			cleanupAuthListeners();
 			notifyQuestEvent("queue_completed", null, undefined, undefined, queueStats);
 			console.log(`All quests finished! Succeeded: ${queueStats.succeeded}, Failed: ${queueStats.failed}, Skipped: ${queueStats.skipped}`);
+			await logAccountBadgeStats();
 			return;
 		}
 

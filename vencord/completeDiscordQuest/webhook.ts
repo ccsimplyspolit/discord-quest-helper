@@ -21,6 +21,19 @@ export interface WebhookNotificationOptions {
     templateContent?: string;
 }
 
+export const WEBHOOK_TEMPLATE_TOKEN_RE = /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}|\{([A-Za-z][A-Za-z0-9_-]*)\}/g;
+
+export function renderWebhookTemplate(template: string, vars: Record<string, string>): string {
+    if (!template || typeof template !== "string") return "";
+    return template.replace(WEBHOOK_TEMPLATE_TOKEN_RE, (fullMatch, escaped?: string, tokenKey?: string) => {
+        if (escaped) return `{${escaped}}`;
+        if (tokenKey && Object.prototype.hasOwnProperty.call(vars, tokenKey)) {
+            return vars[tokenKey] ?? "";
+        }
+        return fullMatch;
+    });
+}
+
 export async function sendRendererWebhookNotification(opts: WebhookNotificationOptions): Promise<{ ok: boolean; status?: number; message?: string }> {
     try {
         const urlStr = opts.url;
@@ -47,8 +60,8 @@ export async function sendRendererWebhookNotification(opts: WebhookNotificationO
         const defaultContent = isQueue ? "Succeeded: {succeeded}; failed: {failed}; skipped: {skipped}" : "[{event-type}] {quest-name} ({timestamp})";
         const rawTitle = opts.templateTitle || defaultTitle;
         const rawContent = opts.templateContent || defaultContent;
-        const renderedTitle = rawTitle.replace(/\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g, (m, k) => (m === "{{" ? "{" : m === "}}" ? "}" : (k && k in templateVars) ? templateVars[k] : m));
-        const renderedContent = rawContent.replace(/\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g, (m, k) => (m === "{{" ? "{" : m === "}}" ? "}" : (k && k in templateVars) ? templateVars[k] : m));
+        const renderedTitle = renderWebhookTemplate(rawTitle, templateVars);
+        const renderedContent = renderWebhookTemplate(rawContent, templateVars);
 
         let discordTarget = false;
         try {

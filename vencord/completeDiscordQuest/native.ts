@@ -1784,13 +1784,12 @@ export interface CustomWebhookOptions {
     templateContent?: string;
 }
 
-const WEBHOOK_TEMPLATE_TOKEN_RE = /\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g;
+const WEBHOOK_TEMPLATE_TOKEN_RE = /\{\{([A-Za-z][A-Za-z0-9_-]*)\}\}|\{([A-Za-z][A-Za-z0-9_-]*)\}/g;
 
 function renderWebhookTemplate(template: string, vars: Record<string, string>): string {
     if (typeof template !== "string" || !template) return "";
-    return template.replace(WEBHOOK_TEMPLATE_TOKEN_RE, (fullMatch, tokenKey?: string) => {
-        if (fullMatch === "{{") return "{";
-        if (fullMatch === "}}") return "}";
+    return template.replace(WEBHOOK_TEMPLATE_TOKEN_RE, (fullMatch, escaped?: string, tokenKey?: string) => {
+        if (escaped) return `{${escaped}}`;
         if (tokenKey && Object.prototype.hasOwnProperty.call(vars, tokenKey)) {
             return vars[tokenKey] ?? "";
         }
