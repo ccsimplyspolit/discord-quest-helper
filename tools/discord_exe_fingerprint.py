@@ -559,17 +559,21 @@ def synthesize_fingerprint(
     Synthesizes a deterministic, cryptographically valid 196-char signed PE64 executableFingerprint
     using real WinVerifyTrust Authenticode SPKI/cert digests and real PE profiles when available.
     """
-    quest_path = format_quest_executable_path(exe_path)
+    quest_path = format_quest_executable_path(exe_path or "game.exe") or "game.exe"
     profile = REAL_PE_PROFILES.get(quest_path)
+    resolved_publisher = publisher_cn or "Valve Corp."
+    if profile and (not publisher_cn or publisher_cn == "Valve Corp."):
+        resolved_publisher = profile["publisher_cn"]
+    cert_raw_cn = "Epic Games Inc." if resolved_publisher == "Epic Games, Inc." else resolved_publisher
+
     if profile:
-        publisher_cn = profile["publisher_cn"]
         file_size = profile["file_size"]
         time_date_stamp = profile["time_date_stamp"]
         size_of_image = profile["size_of_image"]
         hdr_sha256 = bytes.fromhex(profile["hdr_sha256"])
         sec_sha256 = bytes.fromhex(profile["sec_sha256"])
     else:
-        norm_seed = f"{exe_path.lower()}|{publisher_cn}"
+        norm_seed = f"{quest_path}|{cert_raw_cn}"
         seed_hash = hashlib.sha256(norm_seed.encode("utf-8")).digest()
         s0, s1, s2, s3 = struct.unpack_from("<IIII", seed_hash, 0)
 
@@ -586,14 +590,14 @@ def synthesize_fingerprint(
     m_guid = machine_guid if machine_guid is not None else get_machine_guid()
     hw_sha256 = compute_hw_sha256(m_guid, user_id)
 
-    known_spki = REAL_PUBLISHER_SPKI_SHA256.get(publisher_cn)
+    known_spki = REAL_PUBLISHER_SPKI_SHA256.get(resolved_publisher) or REAL_PUBLISHER_SPKI_SHA256.get(cert_raw_cn)
     spki_sha256 = (
         bytes.fromhex(known_spki)
         if known_spki
-        else hashlib.sha256(f"AUTHENTICODE_SPKI_RSA4096:{publisher_cn}".encode("utf-8")).digest()
+        else hashlib.sha256(f"AUTHENTICODE_SPKI_RSA4096:{cert_raw_cn}".encode("utf-8")).digest()
     )
-    cert_raw_cn = "Epic Games Inc." if publisher_cn == "Epic Games, Inc." else publisher_cn
     cert_sha256 = hashlib.sha256(cert_raw_cn.encode("utf-8") + spki_sha256).digest()
+    publisher_cn = resolved_publisher
 
     fp_b64 = pack_and_encrypt_sub_1350(
         is_signed=True,

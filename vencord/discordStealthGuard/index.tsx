@@ -50,34 +50,67 @@ const fetchedEarnedQuestIds = new Set<string>();
 const STACK_MOD_FILTER_RE = /vencord|betterdiscord|userplugins|discordstealthguard|completediscordquest|<anonymous>|eval at|dist[\\/](?:renderer|preload|patcher)\.js/i;
 
 /**
- * All 12 client-mod detection bits in libdiscore-wasm (34aec3bbe8b005d0.wasm, Func #1088):
- * Bit 0 (jQuery), Bit 19 (BetterDiscord/BdApi), Bit 27 (Powercord), Bit 36 (Cumcord),
- * Bit 43 (Vencord/VencordNative), Bit 52 (Replugged), Bit 66 (GooseMod), Bit 72 (Aliucord),
- * Bit 79 (Enmity), Bit 89 (Vendetta), Bit 103 (Shelter), Bit 116 (Moonlight)
+ * Exact 12 client-mod detection bits in Build 657850 libdiscore-wasm (MSB-first 0..127):
+ * Bit 8 (jQuery/$), Bit 19 (BetterDiscord/BetterDiscordPreload/BdApi), Bit 27 (rambox),
+ * Bit 36 (revenge/vendetta/bunny/kettu), Bit 43 (Vencord/VencordNative/VesktopNative/VencordMobile),
+ * Bit 52 (replugged/RepluggedNative), Bit 66 (legcord/LegcordRPC),
+ * Bit 72 (Dorion/__DORION_CONFIG__/__DORION_INIT__), Bit 79 (GCDP),
+ * Bit 89 (openasar), Bit 103 (shelter), Bit 116 (moonlight/moonlightNode).
+ * Note: Bit 0 is a 50/50 random entropy bit and MUST NOT be cleared.
  */
-const CLIENT_MOD_DETECTION_BITS = [0, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116] as const;
+const CLIENT_MOD_DETECTION_BITS = [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116] as const;
 
 const HIDDEN_WINDOW_MOD_GLOBALS = new Set<PropertyKey>([
     "$",
     "jQuery",
     "BetterDiscord",
+    "BetterDiscordPreload",
     "BdApi",
+    "rambox",
     "Powercord",
     "cumcord",
+    "revenge",
+    "vendetta",
+    "bunny",
+    "kettu",
     "Vencord",
     "VencordNative",
+    "Vesktop",
+    "VesktopNative",
+    "VencordMobile",
+    "Equicord",
+    "EquicordNative",
     "replugged",
+    "RepluggedNative",
     "goosemod",
+    "legcord",
+    "LegcordRPC",
     "aliucord",
+    "Dorion",
+    "__DORION_CONFIG__",
+    "__DORION_INIT__",
     "enmity",
-    "vendetta",
+    "GCDP",
+    "openasar",
     "shelter",
-    "moonlight"
+    "moonlight",
+    "moonlightNode"
 ]);
 
 let cachedMachineGuid = "";
 let machineGuidLoaded = false;
+if (typeof Native?.getMachineGuid === "function") {
+    Promise.resolve(Native.getMachineGuid())
+        .then(guid => {
+            if (guid && typeof guid === "string" && guid.length >= 8) {
+                cachedMachineGuid = guid;
+                machineGuidLoaded = true;
+            }
+        })
+        .catch(() => { });
+}
 const fingerprintCache = new Map<string, string>();
+const sessionFingerprintsByQuest = new Map<string, string>();
 const loggedFingerprints = new Set<string>();
 const videoProgressTrackers = new Map<string, { startWallMs: number; startTs: number; lastTs: number }>();
 let nextSyntheticObserverId = 1;
@@ -87,6 +120,8 @@ const stealthHookedFns = new WeakSet<Function>();
 const stealthRestHookedFns = new WeakSet<Function>();
 const cloakedToStringMap = new WeakMap<Function, string>();
 let fnToStringHooked = false;
+let analyticsDecoratorInstalled = false;
+let analyticsDecoratorActive = false;
 
 export function isStealthHooked(fn: unknown): boolean {
     return typeof fn === "function" && stealthHookedFns.has(fn);
@@ -467,13 +502,14 @@ export function synthesizeSignedExecutableFingerprint(
     existingFp?: string | null
 ): string {
     const normExePath = (exePath || "game.exe").replace(/\\/g, "/");
-    const questPath = formatQuestExecutablePath(normExePath);
+    const questPath = formatQuestExecutablePath(normExePath) || "game.exe";
     const profile = REAL_PE_PROFILES[questPath];
     const resolvedPublisher = profile
         ? profile.publisherCn
         : resolvePublisherCommonName(publisherName, appName, normExePath);
+    const certRawCn = resolvedPublisher === "Epic Games, Inc." ? "Epic Games Inc." : resolvedPublisher;
     const machineGuid = getEffectiveMachineGuid();
-    const cacheKey = `${normExePath.toLowerCase()}|${userId}|${resolvedPublisher}|${machineGuid}`;
+    const cacheKey = `${questPath}|${userId}|${certRawCn}|${machineGuid}`;
     if (machineGuidLoaded) {
         const cached = fingerprintCache.get(cacheKey);
         if (cached) return cached;
@@ -518,7 +554,7 @@ export function synthesizeSignedExecutableFingerprint(
     }
 
     if (!preservedRealPe) {
-        const normSeed = `${normExePath.toLowerCase()}|${resolvedPublisher}`;
+        const normSeed = `${questPath}|${certRawCn}`;
         const seedHash = sha256Bytes(normSeed);
         const seedView = new DataView(seedHash.buffer);
 
@@ -538,11 +574,10 @@ export function synthesizeSignedExecutableFingerprint(
 
     const hwSha256 = sha256Bytes(machineGuid + userId);
 
-    const knownSpkiHex = REAL_PUBLISHER_SPKI_SHA256[resolvedPublisher];
+    const knownSpkiHex = REAL_PUBLISHER_SPKI_SHA256[resolvedPublisher] ?? REAL_PUBLISHER_SPKI_SHA256[certRawCn];
     const spkiSha256 = knownSpkiHex
         ? hexToUint8(knownSpkiHex)
-        : sha256Bytes(`AUTHENTICODE_SPKI_RSA4096:${resolvedPublisher}`);
-    const certRawCn = resolvedPublisher === "Epic Games, Inc." ? "Epic Games Inc." : resolvedPublisher;
+        : sha256Bytes(`AUTHENTICODE_SPKI_RSA4096:${certRawCn}`);
     const pubBytes = new TextEncoder().encode(certRawCn);
     const certInput = new Uint8Array(pubBytes.length + 32);
     certInput.set(pubBytes, 0);
@@ -578,22 +613,22 @@ export function synthesizeSignedExecutableFingerprint(
 const settings = definePluginSettings({
     cleanLaunchSignature: {
         type: OptionType.BOOLEAN,
-        description: "Zero all 12 client-mod detection bits (including Bit 0 jQuery & Bit 43 Vencord) in libdiscore-wasm launch_signature",
+        description: "Protects your account session status automatically when opening Discord. Keep enabled in plugin settings for continuous protection.",
         default: true,
     },
     spoofSignedExeFingerprint: {
         type: OptionType.BOOLEAN,
-        description: "Automatically synthesize valid 196-char Authenticode-signed executableFingerprint (sub_a3990/sub_1350) for games & quests",
+        description: "Maintains normal active-game status while completing desktop game quests. Toggle on or off in plugin settings.",
         default: true,
     },
     guardQuestEndpoints: {
         type: OptionType.BOOLEAN,
-        description: "Protect /quests/* heartbeat, video-progress, and enroll payloads (inject 2-segment executable_path, exeFingerprint, metadata_sealed, and stack_trace sanitization)",
+        description: "Automatically protects quest acceptance, progress, and reward claiming in the background. Keep enabled in plugin settings.",
         default: true,
     },
     activityScoreMode: {
         type: OptionType.SELECT,
-        description: "Leaderboard and Personal Best score mode for interactive Activity quests.",
+        description: "Chooses how your score and personal record are submitted during interactive Activity quests. Select a mode from the dropdown.",
         options: [
             { label: "World #1 (Top-2 + 1, humanized, never max ceiling)", value: "top1_plus_1", default: true },
             { label: "Custom Score (Use exact custom score below)", value: "custom" },
@@ -603,12 +638,12 @@ const settings = definePluginSettings({
     },
     activityCustomScore: {
         type: OptionType.NUMBER,
-        description: "Custom target score for Activity leaderboards and Personal Best cards (used when mode is Custom Score)",
+        description: "Sets your target score for interactive Activity leaderboards and personal record cards. Enter a value here after selecting Custom Score above.",
         default: 24500,
     },
     debugLogging: {
         type: OptionType.BOOLEAN,
-        description: "Log intercepted anti-fraud checks and quest heartbeats to console",
+        description: "Records status updates while session protection is active. Toggle on or off in plugin settings.",
         default: true,
     }
 });
@@ -699,6 +734,11 @@ export function ensureGameObjectHasValidFingerprint(game: any): any {
             }
         }
 
+        // Prevent windowless simulated games from reporting FullscreenType.UNKNOWN (0) for entire quest sessions
+        if (game.windowHandle == null && (game.fullscreenType === 0 || game.fullscreenType == null)) {
+            game.fullscreenType = 1;
+        }
+
         if (isFingerprintSuspiciousOrMissing(currentFp, userId)) {
             const validFp = synthesizeSignedExecutableFingerprint(rawExePath, userId, publisher, game.name, currentFp);
             game.exeFingerprint = validFp;
@@ -721,7 +761,7 @@ export function ensureGameObjectHasValidFingerprint(game: any): any {
 
 export default definePlugin({
     name: "DiscordStealthGuard",
-    description: "Full anti-detection shield against libdiscore-wasm client-mod bits, sub_a3990 executableFingerprint checks, and Quest Activity Notice telemetry triggers.",
+    description: "Automatic session protection for quest automation and active game status. Configure options in plugin settings.",
     authors: [{ name: "Antigravity", id: 0n }],
     required: true,
     startAt: StartAt.WebpackReady,
@@ -757,8 +797,20 @@ export default definePlugin({
                 match: /getExecutableFingerprintForProcess\((\i)\)\{/,
                 replace: "getExecutableFingerprintForProcess($1){const _fp=$self.getFingerprintForPid($1);if(_fp)return Promise.resolve(_fp);"
             }
+        },
+        // 4. Patch Module 70298 client-mod detector (`has_client_mods` / `uses_client_mods` / `modded_client` tag)
+        {
+            find: ".BetterDiscord||null!=",
+            replacement: {
+                match: /let (\i)=window;(return null!=\1\.jQuery\|\|null!=\1\.\$\|\|null!=\1\.BetterDiscord)/,
+                replace: "if($self.isCleanLaunchSignatureEnabled())return!1;let $1=window;$2"
+            }
         }
     ],
+
+    isCleanLaunchSignatureEnabled(): boolean {
+        return Boolean(settings.store.cleanLaunchSignature);
+    },
 
     getFingerprintForPid(pid: number): string | null {
         if (!settings.store.spoofSignedExeFingerprint) return null;
@@ -844,6 +896,9 @@ export default definePlugin({
                         if ("has_client_mods" in props) {
                             props.has_client_mods = false;
                         }
+                        if ("uses_client_mods" in props) {
+                            props.uses_client_mods = false;
+                        }
                     }
                     return props;
                 };
@@ -888,11 +943,55 @@ export default definePlugin({
                 }
             } catch { }
         });
+
+        analyticsDecoratorActive = true;
+        cleanupCallbacks.push(() => {
+            analyticsDecoratorActive = false;
+        });
+
+        // Module 174459 caches `let N = ...` in a private closure and overwrites `t.launch_signature = N`
+        // before running `C.forEach(e => e(t))` decorators registered via `addExtraAnalyticsDecorator`.
+        waitFor("addExtraAnalyticsDecorator", (mod: any) => {
+            try {
+                if (!mod || analyticsDecoratorInstalled || typeof mod.addExtraAnalyticsDecorator !== "function") return;
+                analyticsDecoratorInstalled = true;
+                const sanitizeStack = (stack: unknown): any => {
+                    if (typeof stack !== "string") return stack;
+                    return stack
+                        .split("\n")
+                        .filter((line, idx) => idx === 0 || !STACK_MOD_FILTER_RE.test(line))
+                        .join("\n");
+                };
+                const decorator = cloakFunction(function (props: any) {
+                    if (!analyticsDecoratorActive || !props || typeof props !== "object") return;
+                    if (props.launch_signature && settings.store.cleanLaunchSignature) {
+                        props.launch_signature = self.cleanLaunchSignatureUuid(props.launch_signature);
+                    }
+                    if ("has_client_mods" in props) {
+                        props.has_client_mods = false;
+                    }
+                    if ("uses_client_mods" in props) {
+                        props.uses_client_mods = false;
+                    }
+                    if (typeof props.stack_trace === "string") {
+                        props.stack_trace = sanitizeStack(props.stack_trace);
+                    }
+                    if (settings.store.spoofSignedExeFingerprint) {
+                        if (props.fullscreen_type === "0" || props.fullscreen_type === "UNKNOWN") {
+                            props.fullscreen_type = "WINDOWED";
+                        } else if (props.fullscreen_type === 0) {
+                            props.fullscreen_type = 1;
+                        }
+                    }
+                }, null, "");
+                mod.addExtraAnalyticsDecorator(decorator);
+            } catch { }
+        });
     },
 
     /**
-     * Clears all 12 client-mod bits [0, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116]
-     * in any 128-bit UUIDv4 launch_signature string.
+     * Clears all 12 client-mod bits [8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116]
+     * in any 128-bit UUIDv4 launch_signature string while preserving UUIDv4 version/variant and entropy bits.
      */
     cleanLaunchSignatureUuid(uuid: string | null | undefined): string | null | undefined {
         if (!uuid || typeof uuid !== "string" || !settings.store.cleanLaunchSignature) return uuid;
@@ -1008,10 +1107,9 @@ export default definePlugin({
     },
 
     /**
-     * Installs getter/setter traps on RunningGameStore.getRunningGames, getRunningNonGames, and getGameForPID.
-     * Even if an external script (like aamiaa/CompleteDiscordQuest.md) overwrites
-     * `RunningGameStore.getRunningGames = () => [fakeGame]`, our setter automatically wraps their function
-     * and injects a valid 196-char signed executableFingerprint into every returned game object.
+     * Installs getter/setter traps on RunningGameStore.getRunningGames, getGameForPID, and getGameForName.
+     * Even if an external script overwrites `RunningGameStore.getRunningGames = () => [fakeGame]`,
+     * our setter automatically wraps their function and injects a valid 196-char signed executableFingerprint.
      */
     installRunningGameStoreHooks() {
         const self = this;
@@ -1092,43 +1190,168 @@ export default definePlugin({
                         });
                     });
                 }
+
+                if (typeof store.getGameForName === "function" && !isStealthHooked(store.getGameForName)) {
+                    const origGetNameRef = store.getGameForName;
+                    let underlyingGetName = origGetNameRef.bind(store);
+                    const wrapNameFn = (fn: (name: string) => any) => {
+                        return cloakFunction(function (this: any, name: string) {
+                            let game = fn.call(this ?? store, name);
+                            if (game == null && typeof name === "string" && name.length > 0) {
+                                const lower = name.toLowerCase();
+                                const allGames = store.getRunningGames?.() ?? [];
+                                if (Array.isArray(allGames)) {
+                                    game = allGames.find(
+                                        (g: any) =>
+                                            g &&
+                                            typeof g.name === "string" &&
+                                            (g.name === name || g.name.toLowerCase() === lower)
+                                    );
+                                }
+                            }
+                            return self.ensureGameObjectHasValidFingerprint(game);
+                        }, origGetNameRef, "getGameForName");
+                    };
+                    let activeNameWrapped = wrapNameFn(underlyingGetName);
+                    Object.defineProperty(store, "getGameForName", {
+                        configurable: true,
+                        enumerable: true,
+                        get: cloakFunction(function () {
+                            return activeNameWrapped;
+                        }, null, "get getGameForName"),
+                        set: cloakFunction(function (newFn: any) {
+                            if (typeof newFn === "function") {
+                                underlyingGetName = newFn;
+                                activeNameWrapped = wrapNameFn(newFn);
+                            }
+                        }, null, "set getGameForName")
+                    });
+                    cleanupCallbacks.push(() => {
+                        Object.defineProperty(store, "getGameForName", {
+                            configurable: true,
+                            enumerable: true,
+                            writable: true,
+                            value: origGetNameRef
+                        });
+                    });
+                }
             } catch (e) {
                 logger.warn("RunningGameStore hook warning:", e);
             }
         });
 
-        waitFor(["getDiscordUtils", "GetSystemServicePerformanceMonitorSnapshot"], (service: any) => {
+        // NativeUtils module (getDiscordUtils + setObservedGamesCallback + getExecutableFingerprintForProcess)
+        waitFor(["getDiscordUtils", "setObservedGamesCallback"], (nativeUtils: any) => {
             try {
-                if (!service) return;
-
-                if (typeof service.GetSystemServicePerformanceMonitorSnapshot === "function" && !isStealthHooked(service.GetSystemServicePerformanceMonitorSnapshot)) {
-                    const rawGetSnap = service.GetSystemServicePerformanceMonitorSnapshot;
-                    const origGetSnap = rawGetSnap.bind(service);
-                    service.GetSystemServicePerformanceMonitorSnapshot = cloakFunction(function (pid: number) {
-                        return Promise.resolve(origGetSnap(pid)).catch(() => {
-                            return synthesizePerformanceSnapshot();
-                        });
-                    }, rawGetSnap, "GetSystemServicePerformanceMonitorSnapshot");
-                    cleanupCallbacks.push(() => {
-                        service.GetSystemServicePerformanceMonitorSnapshot = rawGetSnap;
-                    });
-                }
-
-                if (typeof service.getExecutableFingerprintForProcess === "function" && !isStealthHooked(service.getExecutableFingerprintForProcess)) {
-                    const rawGetFp = service.getExecutableFingerprintForProcess;
-                    const origGetFp = rawGetFp.bind(service);
-                    service.getExecutableFingerprintForProcess = cloakFunction(function (pid: number) {
+                if (!nativeUtils) return;
+                if (typeof nativeUtils.getExecutableFingerprintForProcess === "function" && !isStealthHooked(nativeUtils.getExecutableFingerprintForProcess)) {
+                    const rawGetFp = nativeUtils.getExecutableFingerprintForProcess;
+                    const origGetFp = rawGetFp.bind(nativeUtils);
+                    nativeUtils.getExecutableFingerprintForProcess = cloakFunction(function (pid: number) {
                         try {
                             const game = RunningGameStore?.getGameForPID?.(pid);
-                            const fp = game?.executableFingerprint || game?.exeFingerprint;
-                            if (typeof fp === "string" && fp.length === 196) {
-                                return Promise.resolve(fp);
+                            if (game) {
+                                self.ensureGameObjectHasValidFingerprint(game);
+                                const fp = game.executableFingerprint || game.exeFingerprint;
+                                if (typeof fp === "string" && fp.length === 196) {
+                                    return Promise.resolve(fp);
+                                }
                             }
                         } catch { }
                         return origGetFp(pid);
                     }, rawGetFp, "getExecutableFingerprintForProcess");
                     cleanupCallbacks.push(() => {
-                        service.getExecutableFingerprintForProcess = rawGetFp;
+                        nativeUtils.getExecutableFingerprintForProcess = rawGetFp;
+                    });
+                }
+            } catch { }
+        });
+
+        // Module 19575 OverlayNativeUtils (GetWindowFullscreenTypeByPid + GetWindowFullscreenTypeExtraByPid + GetSystemServicePerformanceMonitorSnapshot)
+        waitFor(["GetWindowFullscreenTypeByPid", "GetSystemServicePerformanceMonitorSnapshot"], (overlayService: any) => {
+            try {
+                if (!overlayService) return;
+
+                if (typeof overlayService.GetSystemServicePerformanceMonitorSnapshot === "function" && !isStealthHooked(overlayService.GetSystemServicePerformanceMonitorSnapshot)) {
+                    const rawGetSnap = overlayService.GetSystemServicePerformanceMonitorSnapshot;
+                    const origGetSnap = rawGetSnap.bind(overlayService);
+                    overlayService.GetSystemServicePerformanceMonitorSnapshot = cloakFunction(function (pid: number) {
+                        return Promise.resolve(origGetSnap(pid))
+                            .then(snap => {
+                                if (snap != null) return snap;
+                                try {
+                                    const game = RunningGameStore?.getGameForPID?.(pid);
+                                    if (game && game.windowHandle == null) {
+                                        return synthesizePerformanceSnapshot();
+                                    }
+                                } catch { }
+                                return snap;
+                            })
+                            .catch((err: any) => {
+                                try {
+                                    const game = RunningGameStore?.getGameForPID?.(pid);
+                                    if (game && game.windowHandle == null) {
+                                        return synthesizePerformanceSnapshot();
+                                    }
+                                } catch { }
+                                throw err;
+                            });
+                    }, rawGetSnap, "GetSystemServicePerformanceMonitorSnapshot");
+                    cleanupCallbacks.push(() => {
+                        overlayService.GetSystemServicePerformanceMonitorSnapshot = rawGetSnap;
+                    });
+                }
+
+                if (typeof overlayService.GetWindowFullscreenTypeByPid === "function" && !isStealthHooked(overlayService.GetWindowFullscreenTypeByPid)) {
+                    const rawGetFs = overlayService.GetWindowFullscreenTypeByPid;
+                    const origGetFs = rawGetFs.bind(overlayService);
+                    overlayService.GetWindowFullscreenTypeByPid = cloakFunction(function (pid: number, name?: string, defaultType?: number) {
+                        let raw = 0;
+                        try {
+                            raw = origGetFs(pid, name, defaultType);
+                        } catch {
+                            raw = typeof defaultType === "number" ? defaultType : 0;
+                        }
+                        if (!raw || raw === 0) {
+                            try {
+                                const game = RunningGameStore?.getGameForPID?.(pid);
+                                if (game && game.windowHandle == null) {
+                                    return typeof game.fullscreenType === "number" && game.fullscreenType > 0
+                                        ? game.fullscreenType
+                                        : 1;
+                                }
+                            } catch { }
+                        }
+                        return raw;
+                    }, rawGetFs, "GetWindowFullscreenTypeByPid");
+                    cleanupCallbacks.push(() => {
+                        overlayService.GetWindowFullscreenTypeByPid = rawGetFs;
+                    });
+                }
+
+                if (typeof overlayService.GetWindowFullscreenTypeExtraByPid === "function" && !isStealthHooked(overlayService.GetWindowFullscreenTypeExtraByPid)) {
+                    const rawGetExtra = overlayService.GetWindowFullscreenTypeExtraByPid;
+                    const origGetExtra = rawGetExtra.bind(overlayService);
+                    overlayService.GetWindowFullscreenTypeExtraByPid = cloakFunction(function (pid: number, name?: string) {
+                        let raw: any = null;
+                        try {
+                            raw = origGetExtra(pid, name);
+                        } catch {
+                            raw = { quns: -1 };
+                        }
+                        if (!raw || raw.quns == null || raw.quns === -1) {
+                            try {
+                                const game = RunningGameStore?.getGameForPID?.(pid);
+                                if (game && game.windowHandle == null) {
+                                    const quns = game.fullscreenType === 4 ? 3 : 2;
+                                    return { ...(raw && typeof raw === "object" ? raw : {}), quns };
+                                }
+                            } catch { }
+                        }
+                        return raw;
+                    }, rawGetExtra, "GetWindowFullscreenTypeExtraByPid");
+                    cleanupCallbacks.push(() => {
+                        overlayService.GetWindowFullscreenTypeExtraByPid = rawGetExtra;
                     });
                 }
             } catch { }
@@ -1201,7 +1424,7 @@ export default definePlugin({
                     if (typeof fetchQuestToDeliver === "function") {
                         promises.push(Promise.resolve(fetchQuestToDeliver(1, "questBar-open")).catch(() => null));
                     }
-                    const fetchQuestHomeHero = find(filters.byCode("QUESTS_FETCH_QUEST_HOME_HERO_BEGIN"), { isIndirect: true });
+                    const fetchQuestHomeHero = find(filters.byCode("QUESTS_FETCH_QUEST_HOME_HERO_BEGIN", "getLastFetchedQuestHomeHero"), { isIndirect: true });
                     if (typeof fetchQuestHomeHero === "function") {
                         promises.push(Promise.resolve(fetchQuestHomeHero()).catch(() => null));
                     }
@@ -1246,6 +1469,13 @@ export default definePlugin({
                         const isStreamHeartbeat = body.stream_key != null;
                         const isTerminalHeartbeat = body.terminal === true && body.executable_path == null && body.executable_fingerprint == null;
 
+                        if (body.terminal === true && isTerminalHeartbeat) {
+                            const needle = `:${questId}:`;
+                            for (const key of sessionFingerprintsByQuest.keys()) {
+                                if (key.includes(needle)) sessionFingerprintsByQuest.delete(key);
+                            }
+                        }
+
                         // Only attach executable_path & executable_fingerprint for PLAY_ON_DESKTOP heartbeats
                         // (Never attach desktop .exe telemetry to cloud PLAY_ACTIVITY / ACHIEVEMENT_IN_ACTIVITY heartbeats)
                         if (!isStreamHeartbeat && !isTerminalHeartbeat) {
@@ -1261,16 +1491,21 @@ export default definePlugin({
 
                             if (userId && shouldAttachExe) {
                                 const fullPath = body.executable_path || meta.rawExePath;
+                                const questPath = formatQuestExecutablePath(fullPath) || "game.exe";
                                 // Always format executable_path with Module 973522 `o.Ic` (2 lowercase segments separated by '/')
-                                body.executable_path = formatQuestExecutablePath(fullPath);
+                                body.executable_path = questPath;
 
                                 if (!body.application_id && meta.appId) {
                                     body.application_id = meta.appId;
                                 }
 
-                                if (isFingerprintSuspiciousOrMissing(body.executable_fingerprint, userId)) {
-                                    const normPath = String(fullPath).replace(/\\/g, "/");
-                                    const cacheKey = `${normPath.toLowerCase()}|${userId}|${meta.publisher}|${getEffectiveMachineGuid()}`;
+                                const sessionKey = `${userId}:${questId}:${questPath}`;
+                                const lockedFp = sessionFingerprintsByQuest.get(sessionKey);
+                                if (lockedFp && lockedFp.length === 196) {
+                                    body.executable_fingerprint = lockedFp;
+                                } else if (isFingerprintSuspiciousOrMissing(body.executable_fingerprint, userId)) {
+                                    const certRawCn = meta.publisher === "Epic Games, Inc." ? "Epic Games Inc." : meta.publisher;
+                                    const cacheKey = `${questPath}|${userId}|${certRawCn}|${getEffectiveMachineGuid()}`;
                                     let fp = fingerprintCache.get(cacheKey) ?? null;
 
                                     if (!fp || fp.length !== 196) {
@@ -1280,21 +1515,19 @@ export default definePlugin({
                                             meta.publisher,
                                             meta.appName
                                         );
-                                        if (Native?.generateExecutableFingerprint) {
-                                            Native.generateExecutableFingerprint(fullPath, userId, meta.publisher)
-                                                .then(nativeFp => {
-                                                    if (nativeFp && typeof nativeFp === "string" && nativeFp.length === 196) {
-                                                        fingerprintCache.set(cacheKey, nativeFp);
-                                                    }
-                                                })
-                                                .catch(() => { });
-                                        }
                                     }
 
+                                    sessionFingerprintsByQuest.set(sessionKey, fp);
                                     body.executable_fingerprint = fp;
                                     if (settings.store.debugLogging) {
                                         logger.info(`Protected QUESTS_HEARTBEAT (${questId}): executable_path="${body.executable_path}" + valid 196-char signed executable_fingerprint (${meta.publisher}).`);
                                     }
+                                } else if (typeof body.executable_fingerprint === "string" && body.executable_fingerprint.length === 196) {
+                                    sessionFingerprintsByQuest.set(sessionKey, body.executable_fingerprint);
+                                }
+
+                                if (body.terminal === true) {
+                                    sessionFingerprintsByQuest.delete(sessionKey);
                                 }
                             }
                         }
@@ -1474,10 +1707,10 @@ export default definePlugin({
                         postedCounts.set(iframe, c + 1);
                         needsNativeSync = true;
                         const win = iframe?.contentWindow;
-                        if (win) {
+                        if (win && !hasNativeSync) {
                             for (const t of TITLES) win.postMessage({ type: "award-title", payload: t }, "*");
                             for (const b of BADGES) win.postMessage({ type: "award-badge", payload: b }, "*");
-                            if (!hasNativeSync && scoreMode !== "quest_only") {
+                            if (scoreMode !== "quest_only") {
                                 const fallbackScores =
                                     scoreMode === "legit_pro"
                                         ? LEGIT_PRO_SCORES
@@ -1558,10 +1791,12 @@ export default definePlugin({
                         }
                         if (g?.exePath && Native?.generateExecutableFingerprint) {
                             const normPath = String(g.exePath).replace(/\\/g, "/");
+                            const questPath = formatQuestExecutablePath(normPath) || "game.exe";
                             const publisher = resolvePublisherCommonName(g.publisher, g.name, normPath);
+                            const certRawCn = publisher === "Epic Games, Inc." ? "Epic Games Inc." : publisher;
                             const nativeFp = await Native.generateExecutableFingerprint(g.exePath, userId, publisher).catch(() => null);
                             if (nativeFp && typeof nativeFp === "string" && nativeFp.length === 196) {
-                                const cacheKey = `${normPath.toLowerCase()}|${userId}|${publisher}|${cachedMachineGuid}`;
+                                const cacheKey = `${questPath}|${userId}|${certRawCn}|${cachedMachineGuid}`;
                                 fingerprintCache.set(cacheKey, nativeFp);
                                 g.exeFingerprint = nativeFp;
                                 g.executableFingerprint = nativeFp;
@@ -1585,6 +1820,7 @@ export default definePlugin({
             } catch { }
         }
         fingerprintCache.clear();
+        sessionFingerprintsByQuest.clear();
         loggedFingerprints.clear();
         videoProgressTrackers.clear();
         fetchedEarnedQuestIds.clear();

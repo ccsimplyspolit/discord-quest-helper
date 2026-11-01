@@ -5,8 +5,11 @@
  */
 
 import { ConnectSrc, CspPolicies, ImageScriptsAndCssSrc } from "@main/csp";
-import { randomBytes, randomUUID } from "crypto";
+import { execFileSync } from "child_process";
+import { createHash, randomBytes, randomUUID } from "crypto";
 import { app, IpcMainInvokeEvent, session } from "electron";
+import * as fs from "fs";
+import * as os from "os";
 
 const ActivityFrameAndConnectSrc = [...ImageScriptsAndCssSrc, "frame-src", "child-src", "media-src"];
 CspPolicies["*.discordsays.com"] = ActivityFrameAndConnectSrc;
@@ -185,6 +188,18 @@ installActivityCorsAndPreflightBypass();
 
 const DEFAULT_UNIVERSE_ID = "78a74ba6-b027-4b0e-a686-9a6f4124c068";
 const DEFAULT_ARISE_CLIENT = "spades-prod-main-4835c58";
+const DEFAULT_DESKTOP_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9266 Chrome/152.0.7977.167 Electron/44.9.3 Safari/537.36";
+
+function resolveElectronUserAgent(event?: IpcMainInvokeEvent): string {
+    try {
+        const ua = event?.sender?.session?.getUserAgent?.() || session?.defaultSession?.getUserAgent?.();
+        if (typeof ua === "string" && ua.trim().length > 0) {
+            return ua.trim();
+        }
+    } catch {}
+    return DEFAULT_DESKTOP_USER_AGENT;
+}
 
 export type ActivityScoreMode = "top1_plus_1" | "custom" | "legit_pro" | "quest_only";
 
@@ -231,13 +246,16 @@ function buildAriseRequestId(bodyStr?: string): string {
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-async function discoverAriseMetadata(baseOrigin: string): Promise<{ universeId: string; appVersion: string }> {
+async function discoverAriseMetadata(
+    baseOrigin: string,
+    userAgent = DEFAULT_DESKTOP_USER_AGENT
+): Promise<{ universeId: string; appVersion: string }> {
     let universeId = DEFAULT_UNIVERSE_ID;
     let appVersion = DEFAULT_ARISE_CLIENT;
     try {
         const htmlRes = await fetch(`${baseOrigin}/`, {
             method: "GET",
-            headers: { "User-Agent": "Mozilla/5.0" },
+            headers: { "User-Agent": userAgent },
             signal: AbortSignal.timeout(8000)
         });
         if (!htmlRes.ok) return { universeId, appVersion };
@@ -247,7 +265,7 @@ async function discoverAriseMetadata(baseOrigin: string): Promise<{ universeId: 
 
         const jsRes = await fetch(`${baseOrigin}${scriptMatch[1]}`, {
             method: "GET",
-            headers: { "User-Agent": "Mozilla/5.0" },
+            headers: { "User-Agent": userAgent },
             signal: AbortSignal.timeout(10000)
         });
         if (!jsRes.ok) return { universeId, appVersion };
@@ -379,10 +397,11 @@ function solveShotScoreRun(targetScore: number, meta: ValorantAcesBoardMeta): So
             if (candMeanTtk < minTtk || candMeanTtk > maxTtk) continue;
             const actualI = Math.max(0, Math.min(1, (1.8 - candMeanTtk) / 1.1));
             const actualMult = 1.0 + 1.6 * Math.pow(actualI, 1.4);
-            if (Math.round(s * actualMult * 2.0) === T) {
+            const roundedMult = Number(actualMult.toFixed(4));
+            if (Math.round(s * actualMult * 2.0) === T && Math.round(s * roundedMult * 2.0) === T) {
                 chosenS = s;
                 chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
-                chosenTtkMult = Number(actualMult.toFixed(4));
+                chosenTtkMult = roundedMult;
                 return true;
             }
         }
@@ -947,6 +966,7 @@ export async function syncActivityMaxRecords(
     const probeScript = `
 (function() {
     try {
+        const sanitizeUid = (raw) => String(raw || "").split(".user.")[0].trim();
         const tok = window.localStorage.getItem("ARISEENGINE_AUTHTOKEN") || "";
         const devId = window.localStorage.getItem("ARISE_DEVICE_ID") || "";
         let uid = "";
@@ -954,20 +974,20 @@ export async function syncActivityMaxRecords(
             const b64 = tok.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
             const payload = JSON.parse(atob(b64));
             if (payload && typeof payload.sub === "string" && payload.sub.trim()) {
-                uid = payload.sub.trim();
+                uid = sanitizeUid(payload.sub);
             }
         }
         if (!uid) {
             const cand = window.userData?.userId || window.pc?.Application?.getApplication?.()?.spadesAccountId;
-            if (typeof cand === "string" && cand.trim()) uid = cand.trim();
+            if (typeof cand === "string" && cand.trim()) uid = sanitizeUid(cand);
         }
         if (!uid) {
             for (let i = 0; i < window.localStorage.length; i++) {
                 const k = window.localStorage.key(i) || "";
-                const m = k.match(/^globalaces\\.runs\\.v1\\.user\\.(.+)$/);
+                const m = k.match(/^globalaces\\.runs\\.v1\\.user\\.([^.]+)$/);
                 if (m && m[1]) {
-                    uid = decodeURIComponent(m[1]);
-                    break;
+                    uid = sanitizeUid(decodeURIComponent(m[1]));
+                    if (uid) break;
                 }
             }
         }
@@ -991,6 +1011,7 @@ export async function syncActivityMaxRecords(
     }
 
     const baseOrigin = `https://${appIdStr}.discordsays.com`;
+    const userAgent = resolveElectronUserAgent(event);
     const buildSimpleHeaders = (token = "", extra: Record<string, string> = {}) => ({
         "Content-Type": "application/json",
         "Accept": "*/*",
@@ -1001,6 +1022,7 @@ export async function syncActivityMaxRecords(
         "X-Arise-Client": DEFAULT_ARISE_CLIENT,
         "Origin": baseOrigin,
         "Referer": `${baseOrigin}/`,
+        "User-Agent": userAgent,
         ...extra
     });
 
@@ -1034,7 +1056,8 @@ export async function syncActivityMaxRecords(
     const injectionScript = `
 (function() {
     try {
-        const HOST_USER_ID = ${JSON.stringify(hostUserId)};
+        const sanitizeUid = (raw) => String(raw || "").split(".user.")[0].trim();
+        const HOST_USER_ID = sanitizeUid(${JSON.stringify(hostUserId)});
         const TITLES = ${JSON.stringify(VALORANT_ACES_TITLES)};
         const BADGES = ${JSON.stringify(VALORANT_ACES_BADGES)};
         const LEVEL_SCORES = ${JSON.stringify(levelScoresMap)};
@@ -1050,7 +1073,7 @@ export async function syncActivityMaxRecords(
                 const b64 = ariseToken.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
                 const payload = JSON.parse(atob(b64));
                 if (payload && typeof payload.sub === "string" && payload.sub.trim()) {
-                    userId = payload.sub.trim();
+                    userId = sanitizeUid(payload.sub);
                 }
             }
         } catch {}
@@ -1059,7 +1082,7 @@ export async function syncActivityMaxRecords(
             try {
                 const candidate = window.userData?.userId || window.pc?.Application?.getApplication?.()?.spadesAccountId || HOST_USER_ID;
                 if (typeof candidate === "string" && candidate.trim()) {
-                    userId = candidate.trim();
+                    userId = sanitizeUid(candidate);
                 }
             } catch {}
         }
@@ -1093,15 +1116,26 @@ export async function syncActivityMaxRecords(
             try {
                 const ls = win?.localStorage;
                 if (!ls) return;
+                const keysToRemove = [];
                 const discoveredUids = [];
                 for (let i = 0; i < ls.length; i++) {
                     const k = ls.key(i) || "";
-                    const m = k.match(/^(?:globalaces\\.runs\\.v1|globalAces\\.bestCombatScore|globalaces\\.arise\\.sent\\.v1)\\.user\\.(.+)$/);
+                    if (/\\.user\\..*\\.user\\./.test(k)) {
+                        keysToRemove.push(k);
+                        continue;
+                    }
+                    const m = k.match(/^(?:globalaces\\.runs\\.v1|globalAces\\.bestCombatScore|globalaces\\.arise\\.sent\\.v1)\\.user\\.([^.]+)$/);
                     if (m && m[1]) {
-                        try { discoveredUids.push(decodeURIComponent(m[1])); } catch {}
+                        try {
+                            const dec = sanitizeUid(decodeURIComponent(m[1]));
+                            if (dec) discoveredUids.push(dec);
+                        } catch {}
                     }
                 }
-                const uidList = Array.from(new Set([uid, userId, HOST_USER_ID, ...discoveredUids].filter(Boolean)));
+                for (const badKey of keysToRemove) {
+                    try { ls.removeItem(badKey); } catch {}
+                }
+                const uidList = Array.from(new Set([sanitizeUid(uid), userId, HOST_USER_ID, ...discoveredUids].filter(Boolean)));
                 for (const u of uidList) {
                     const uidEnc = encodeURIComponent(u);
                     ls.setItem("globalaces.runs.v1.user." + uidEnc, runsPayload);
@@ -1120,14 +1154,14 @@ export async function syncActivityMaxRecords(
             try {
                 const pcApp = win?.pc?.Application?.getApplication?.();
                 if (!pcApp?.root) return false;
-                const activeUid = pcApp.spadesAccountId || userId;
+                const activeUid = sanitizeUid(pcApp.spadesAccountId || userId);
                 if (activeUid) {
                     pcApp.spadesAccountId = activeUid;
                 }
                 writeStorageForUser(win, activeUid);
 
                 const applyToPc = (targetUid) => {
-                    const u = targetUid || pcApp.spadesAccountId || userId;
+                    const u = sanitizeUid(targetUid || pcApp.spadesAccountId || userId);
                     const uidEnc = u ? encodeURIComponent(u) : "";
                     writeStorageForUser(win, u);
                     let touched = false;
@@ -1146,7 +1180,8 @@ export async function syncActivityMaxRecords(
                         if (!scr) continue;
                         if (scr.runHistory) {
                             const rh = scr.runHistory;
-                            const baseKey = rh._accountBaseKey || rh._baseStorageKey || "globalaces.runs.v1";
+                            const baseKey = String(rh._accountBaseKey || rh._baseStorageKey || "globalaces.runs.v1").split(".user.")[0];
+                            rh._accountBaseKey = baseKey;
                             if (u) {
                                 rh._accountUserId = u;
                                 rh._accountId = u;
@@ -1168,7 +1203,8 @@ export async function syncActivityMaxRecords(
                         }
                         if (scr.shotScore) {
                             const ss = scr.shotScore;
-                            const baseHsKey = ss._accountBaseHighKey || ss._baseHighScoreKey || "globalAces.bestCombatScore";
+                            const baseHsKey = String(ss._accountBaseHighKey || ss._baseHighScoreKey || "globalAces.bestCombatScore").split(".user.")[0];
+                            ss._accountBaseHighKey = baseHsKey;
                             if (u) {
                                 ss._accountUserId = u;
                                 ss._accountId = u;
@@ -1184,7 +1220,8 @@ export async function syncActivityMaxRecords(
                         }
                         if (scr.ariseRewards) {
                             const ar = scr.ariseRewards;
-                            const baseArKey = ar._accountBaseKey || ar._baseStorageKey || "globalaces.arise.sent.v1";
+                            const baseArKey = String(ar._accountBaseKey || ar._baseStorageKey || "globalaces.arise.sent.v1").split(".user.")[0];
+                            ar._accountBaseKey = baseArKey;
                             if (u) {
                                 ar._accountUserId = u;
                                 ar._accountId = u;
@@ -1304,7 +1341,8 @@ export async function completeActivityQuest(
     const appIdStr = String(applicationId);
     const questIdStr = String(questId);
     const baseOrigin = `https://${appIdStr}.discordsays.com`;
-    const { universeId, appVersion } = await discoverAriseMetadata(baseOrigin);
+    const userAgent = resolveElectronUserAgent(event);
+    const { universeId, appVersion } = await discoverAriseMetadata(baseOrigin, userAgent);
 
     const buildHeaders = (token = "", extra: Record<string, string> = {}) => ({
         "Content-Type": "application/json",
@@ -1316,7 +1354,7 @@ export async function completeActivityQuest(
         "X-Arise-Client": appVersion,
         "Origin": baseOrigin,
         "Referer": `${baseOrigin}/`,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9265 Chrome/148.0.7778.280 Electron/42.11.15 Safari/537.36",
+        "User-Agent": userAgent,
         ...extra
     });
 
@@ -1396,4 +1434,603 @@ export async function completeActivityQuest(
         };
     }
 }
+
+let cachedNativeMachineGuid: string | null = null;
+
+function sha256Native(data: Buffer | string): Buffer {
+    return createHash("sha256").update(data).digest();
+}
+
+function deriveHostFallbackGuid(): string {
+    try {
+        const seed = `HOST_GUID_V1:${os.hostname()}:${os.userInfo().username}:${os.platform()}:${os.arch()}`;
+        const h = sha256Native(seed);
+        h[6] = (h[6] & 0x0f) | 0x40;
+        h[8] = (h[8] & 0x3f) | 0x80;
+        const hex = h.subarray(0, 16).toString("hex");
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+    } catch {
+        return "a1b2c3d4-e5f6-4789-abcd-ef0123456789";
+    }
+}
+
+function getMachineGuidSync(): string {
+    if (cachedNativeMachineGuid) return cachedNativeMachineGuid;
+    try {
+        if (process.platform === "win32") {
+            const out = execFileSync(
+                "reg.exe",
+                ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"],
+                { encoding: "utf8", windowsHide: true, timeout: 3000 }
+            );
+            const match = out.match(/MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]+)/i);
+            if (match?.[1]) {
+                cachedNativeMachineGuid = match[1].trim();
+                return cachedNativeMachineGuid;
+            }
+        }
+    } catch {}
+    cachedNativeMachineGuid = deriveHostFallbackGuid();
+    return cachedNativeMachineGuid;
+}
+
+export async function getMachineGuid(_: IpcMainInvokeEvent): Promise<string> {
+    return getMachineGuidSync();
+}
+
+const NATIVE_PUBLISHER_SPKI_SHA256: Record<string, string> = {
+    "Valve Corp.": "371a0623e9c19d00bbb1e738b4733455dc76db156b54396d0ea258d3fcd0cbb2",
+    "Microsoft Corporation": "8d79b51d140a92816a138dcba36f41720b3ce5063718cfbc4ad77efde8315a4d",
+    "Epic Games Inc.": "2793b500911bdee5ff0ebdcb308122751a50bacd6dfecd462a2ff0d6f1d980eb",
+    "Epic Games, Inc.": "2793b500911bdee5ff0ebdcb308122751a50bacd6dfecd462a2ff0d6f1d980eb",
+    "Grinding Gear Games Limited": "4a7d34305a2f2d4d80468c26c2a577c12b7c0f75fa259831e437d2dca4db1e26",
+    "BATTLESTATE GAMES LIMITED": "9f2bb2c2b8be0d67edbd1d8ef7c1975b01b167240532992803a1db5d11630271",
+    "BattlEye Innovations e.K.": "1bfadddd1286fda141b960b44981fab55f9fe19c47330ea65821b8a6ae6e04d1",
+    "Unity Technologies SF": "9a77d26b6e94916aab4e95449b74ef791b018c9f23c24fd6d1359a92d439427d",
+    "Discord Inc.": "019f6eae63414925d0d85965c4f4af0eabec52dfb171c39d253ba5f19498c095",
+};
+
+interface NativeRealPeProfile {
+    publisherCn: string;
+    fileSize: bigint;
+    timeDateStamp: number;
+    sizeOfImage: number;
+    hdrSha256: string;
+    secSha256: string;
+}
+
+const NATIVE_REAL_PE_PROFILES: Record<string, NativeRealPeProfile> = {
+    "win64/cs2.exe": {
+        publisherCn: "Valve Corp.",
+        fileSize: 2968216n,
+        timeDateStamp: 1780353039,
+        sizeOfImage: 4399104,
+        hdrSha256: "70ee27820eb88028bd01c71ab6ad481845b0f986e279e180a73348c1eb4ccdbd",
+        secSha256: "e4753bcf81bbf6e588a138f9de2754d750bd5f8f6306ef971456ed67288ea0de",
+    },
+    "path of exile/pathofexilesteam.exe": {
+        publisherCn: "Grinding Gear Games Limited",
+        fileSize: 79345496n,
+        timeDateStamp: 1788480744,
+        sizeOfImage: 81326080,
+        hdrSha256: "701cd4cc5340283e472bb3bb8c533c93437e63d2e416720d82fcb7606d915df1",
+        secSha256: "8587c9700969c5d30caf6fd7dda44975f252a6a8a055d07b1a6e563bacab9a2d",
+    },
+    "arena/escapefromtarkovarena.exe": {
+        publisherCn: "BATTLESTATE GAMES LIMITED",
+        fileSize: 3243360n,
+        timeDateStamp: 1778746394,
+        sizeOfImage: 684032,
+        hdrSha256: "e809d7e33272567b5d2525f324cf5bd33555471e080b46df8c58d26590e21883",
+        secSha256: "c602de1c1277db5de20b3753cd0074071fedc69bdca6f5f0a4b8b1661d3d7d9b",
+    },
+    "age of empires iv/reliccardinal.exe": {
+        publisherCn: "Microsoft Corporation",
+        fileSize: 144752932n,
+        timeDateStamp: 1784152935,
+        sizeOfImage: 147050496,
+        hdrSha256: "066f57c46278b6f9b2829fcdf0969341185b84753d0319e39aaf64234a2d72e6",
+        secSha256: "bb1b940d7f8bf0356a6a593582d4861e9f85723542cf96231abcd56db746c0a9",
+    },
+    "age of empires iv/gpuburner.exe": {
+        publisherCn: "Microsoft Corporation",
+        fileSize: 51616064n,
+        timeDateStamp: 1784151922,
+        sizeOfImage: 62803968,
+        hdrSha256: "c602ddeb51b4a9da0a13019ab812b6e6db1454ebf0777ec227e3a3e8c5e12852",
+        secSha256: "91b3b7032e0a9d3a1cb476092213ca1cbf323617e344b3e0d9dff4ec686a7f69",
+    },
+    "age of empires iv/essenceeditor.exe": {
+        publisherCn: "Microsoft Corporation",
+        fileSize: 10231608n,
+        timeDateStamp: 3813183688,
+        sizeOfImage: 10231808,
+        hdrSha256: "a25ba2a7621664f67ea7f861471098150dea3e874ff2f5fa875d2d3708cdf925",
+        secSha256: "52b2292823de3571a3d64eba977f923a30e7bd16b9b003c6beec694a2c4778e2",
+    },
+    "win64/vconsole2.exe": {
+        publisherCn: "Valve Corp.",
+        fileSize: 5137560n,
+        timeDateStamp: 1791254866,
+        sizeOfImage: 6017024,
+        hdrSha256: "f498b04ef723de1b746d5a8ffabdc2ef017a4d13acb669ab4b764836c1818bad",
+        secSha256: "c9a39e259c2bdf10c2cf2e27a57aeea9ad318d1c6492e6949d85c532c6c9e485",
+    },
+    "steam/steam.exe": {
+        publisherCn: "Valve Corp.",
+        fileSize: 5823128n,
+        timeDateStamp: 1792617103,
+        sizeOfImage: 7430144,
+        hdrSha256: "e8bcb8fce00b9a29b1d5fca5e01607cdd06ba30329bc605994dced5d0741c196",
+        secSha256: "476550e4d464edbaf9bdd27f609247f699e72e8db60b37fbf5b72f192b06062b",
+    },
+};
+
+function formatQuestExePathNative(exePath: string): string {
+    const norm = (exePath || "").replace(/\\/g, "/").toLowerCase().replace(/\/+$/, "");
+    const parts = norm.split("/").filter(Boolean);
+    return parts.length >= 2 ? parts.slice(-2).join("/") : norm;
+}
+
+function resolveLocalExecutablePathNative(exePath: string): string | null {
+    if (!exePath) return null;
+    try {
+        if (fs.existsSync(exePath)) return exePath;
+        const norm = exePath.replace(/\\/g, "/");
+        const questPath = formatQuestExePathNative(norm);
+        const knownDirectPaths: Record<string, string[]> = {
+            "win64/cs2.exe": [
+                "C:/Program Files (x86)/Steam/steamapps/common/Counter-Strike Global Offensive/game/bin/win64/cs2.exe",
+                "D:/SteamLibrary/steamapps/common/Counter-Strike Global Offensive/game/bin/win64/cs2.exe",
+                "K:/SteamLibrary/steamapps/common/Counter-Strike Global Offensive/game/bin/win64/cs2.exe",
+                "C:/Program Files (x86)/Steam/steamapps/content/app_730/depot_2347771/game/bin/win64/cs2.exe",
+            ],
+            "path of exile/pathofexilesteam.exe": [
+                "D:/SteamLibrary/steamapps/common/Path of Exile/PathOfExileSteam.exe",
+                "C:/Program Files (x86)/Steam/steamapps/common/Path of Exile/PathOfExileSteam.exe",
+                "K:/SteamLibrary/steamapps/common/Path of Exile/PathOfExileSteam.exe",
+            ],
+            "arena/escapefromtarkovarena.exe": [
+                "D:/Games/Arena/EscapeFromTarkovArena.exe",
+                "C:/Games/Arena/EscapeFromTarkovArena.exe",
+            ],
+            "age of empires iv/reliccardinal.exe": [
+                "D:/SteamLibrary/steamapps/common/Age of Empires IV/RelicCardinal.exe",
+                "C:/Program Files (x86)/Steam/steamapps/common/Age of Empires IV/RelicCardinal.exe",
+            ],
+            "age of empires iv/gpuburner.exe": [
+                "D:/SteamLibrary/steamapps/common/Age of Empires IV/GPUBurner.exe",
+                "C:/Program Files (x86)/Steam/steamapps/common/Age of Empires IV/GPUBurner.exe",
+            ],
+            "age of empires iv/essenceeditor.exe": [
+                "D:/SteamLibrary/steamapps/common/Age of Empires IV/EssenceEditor.exe",
+                "C:/Program Files (x86)/Steam/steamapps/common/Age of Empires IV/EssenceEditor.exe",
+            ],
+            "win64/vconsole2.exe": [
+                "D:/SteamLibrary/steamapps/common/dota 2 beta/game/bin/win64/vconsole2.exe",
+                "C:/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/bin/win64/vconsole2.exe",
+            ],
+            "steam/steam.exe": [
+                "C:/Program Files (x86)/Steam/steam.exe",
+            ],
+        };
+        const directList = knownDirectPaths[questPath];
+        if (directList) {
+            for (const p of directList) {
+                if (fs.existsSync(p)) return p;
+            }
+        }
+        const commonIdx = norm.toLowerCase().indexOf("/steamapps/common/");
+        const relAfterCommon = commonIdx !== -1 ? norm.slice(commonIdx + "/steamapps/common/".length) : questPath;
+        const searchRoots = [
+            "C:/Program Files (x86)/Steam/steamapps/common",
+            "D:/SteamLibrary/steamapps/common",
+            "K:/SteamLibrary/steamapps/common",
+            "D:/Games",
+            "K:/Games"
+        ];
+        for (const root of searchRoots) {
+            const candidate = `${root}/${relAfterCommon}`;
+            if (fs.existsSync(candidate)) return candidate;
+        }
+    } catch {}
+    return null;
+}
+
+export async function generateExecutableFingerprint(
+    _: IpcMainInvokeEvent,
+    exePath: string,
+    userId: string,
+    publisherName = "Valve Corp."
+): Promise<string> {
+    const safeExePath = String(exePath || "game.exe");
+    const safeUserId = String(userId || "");
+    const machineGuid = getMachineGuidSync();
+    const questPath = formatQuestExePathNative(safeExePath) || "game.exe";
+    const profile = NATIVE_REAL_PE_PROFILES[questPath];
+    let resolvedPublisher = publisherName || "Valve Corp.";
+    if (profile && (!publisherName || publisherName === "Valve Corp.")) {
+        resolvedPublisher = profile.publisherCn;
+    }
+    const certRawCn = resolvedPublisher === "Epic Games, Inc." ? "Epic Games Inc." : resolvedPublisher;
+    const normSeed = `${questPath}|${certRawCn}`;
+
+    let fileSize = 0n;
+    let timeDateStamp = 0;
+    let sizeOfImage = 0;
+    let hdrSha256: Buffer | null = null;
+    let secSha256: Buffer | null = null;
+
+    try {
+        const resolvedDiskPath = resolveLocalExecutablePathNative(safeExePath);
+        if (resolvedDiskPath) {
+            const stat = fs.statSync(resolvedDiskPath);
+            if (stat.isFile() && stat.size > 512 * 1024) {
+                const fd = fs.openSync(resolvedDiskPath, "r");
+                try {
+                    const readLen = Math.min(stat.size, 0x10000);
+                    const buf = Buffer.alloc(readLen);
+                    fs.readSync(fd, buf, 0, readLen, 0);
+                    if (buf.readUInt16LE(0) === 0x5a4d) {
+                        const eLfanew = buf.readInt32LE(0x3c);
+                        if (eLfanew > 0 && eLfanew + 0x108 <= readLen && buf.readUInt32LE(eLfanew) === 0x00004550) {
+                            const numSections = buf.readUInt16LE(eLfanew + 6);
+                            const tds = buf.readUInt32LE(eLfanew + 8);
+                            const sizeOfOpt = buf.readUInt16LE(eLfanew + 0x14);
+                            const magic = buf.readUInt16LE(eLfanew + 0x18);
+                            const soi = buf.readUInt32LE(eLfanew + 0x50);
+                            const secStart = eLfanew + 0x18 + sizeOfOpt;
+                            const secEnd = secStart + numSections * 40;
+                            if (
+                                magic === 0x020b &&
+                                numSections > 0 &&
+                                tds !== 0 &&
+                                soi >= 0x1000 &&
+                                (soi & 0xfff) === 0 &&
+                                secStart <= readLen &&
+                                secEnd <= readLen
+                            ) {
+                                fileSize = BigInt(stat.size);
+                                timeDateStamp = tds;
+                                sizeOfImage = soi;
+                                hdrSha256 = sha256Native(buf.subarray(0, secStart));
+                                secSha256 = sha256Native(buf.subarray(secStart, secEnd));
+                            }
+                        }
+                    }
+                } finally {
+                    fs.closeSync(fd);
+                }
+            }
+        }
+    } catch {}
+
+    if ((fileSize === 0n || !hdrSha256 || !secSha256) && profile) {
+        fileSize = profile.fileSize;
+        timeDateStamp = profile.timeDateStamp;
+        sizeOfImage = profile.sizeOfImage;
+        hdrSha256 = Buffer.from(profile.hdrSha256, "hex");
+        secSha256 = Buffer.from(profile.secSha256, "hex");
+    }
+
+    const seedHash = sha256Native(normSeed);
+    if (fileSize === 0n) {
+        const baseMb = 48 + (seedHash.readUInt32LE(0) % 92);
+        const extraBytes = (seedHash.readUInt32LE(4) % 1024) * 512;
+        fileSize = BigInt(baseMb * 1024 * 1024 + extraBytes);
+    }
+    if (timeDateStamp === 0) {
+        timeDateStamp = 1704067200 + (seedHash.readUInt32LE(8) % 55000000);
+    }
+    if (sizeOfImage === 0) {
+        const pages = 0x3800 + (seedHash.readUInt16LE(12) % 0x4000);
+        sizeOfImage = (pages * 0x1000) >>> 0;
+    }
+    if (!hdrSha256) {
+        hdrSha256 = sha256Native(`PE_HEADERS_V1:${normSeed}:${timeDateStamp}:${sizeOfImage}`);
+    }
+    if (!secSha256) {
+        secSha256 = sha256Native(`PE_SECTIONS_V1:${normSeed}:${sizeOfImage}`);
+    }
+
+    const hwSha256 = sha256Native(Buffer.from(machineGuid + safeUserId, "utf8"));
+    const knownSpkiHex = NATIVE_PUBLISHER_SPKI_SHA256[resolvedPublisher] ?? NATIVE_PUBLISHER_SPKI_SHA256[certRawCn];
+    const spkiSha256 = knownSpkiHex
+        ? Buffer.from(knownSpkiHex, "hex")
+        : sha256Native(`AUTHENTICODE_SPKI_RSA4096:${certRawCn}`);
+    const certSha256 = sha256Native(Buffer.concat([Buffer.from(certRawCn, "utf8"), spkiSha256]));
+
+    const packet = Buffer.alloc(0x92);
+    packet.writeUInt8(1, 0x00);
+    packet.writeUInt8(0x03, 0x01);
+    packet.writeBigUInt64LE(fileSize, 0x02);
+    packet.writeUInt32LE(timeDateStamp >>> 0, 0x0a);
+    packet.writeUInt32LE(sizeOfImage >>> 0, 0x0e);
+    hdrSha256.copy(packet, 0x12);
+    hwSha256.copy(packet, 0x32);
+    secSha256.copy(packet, 0x52);
+    certSha256.copy(packet, 0x72);
+
+    const xorKey = sha256Native(Buffer.from(safeUserId + "https://discord.com/careers", "utf8"));
+    for (let i = 1; i < 0x92; i++) {
+        packet[i] ^= xorKey[(i - 1) & 0x1f];
+    }
+    return packet.toString("base64");
+}
+
+export type WebhookEventType = "quest_started" | "quest_completed" | "reward_claimed" | "queue_completed";
+export type WebhookFormatMode = "auto" | "discord" | "dqh_v1";
+
+export interface WebhookQueueStats {
+    succeeded: number;
+    failed: number;
+    skipped: number;
+}
+
+export interface CustomWebhookOptions {
+    url: string;
+    bearerToken?: string;
+    format?: WebhookFormatMode;
+    eventType: WebhookEventType;
+    locale?: string;
+    isTest?: boolean;
+    questId?: string;
+    questName?: string;
+    taskType?: string;
+    estimatedCompleteAt?: string | null;
+    rewardImage?: string | null;
+    queue?: WebhookQueueStats | null;
+    templateTitle?: string;
+    templateContent?: string;
+}
+
+const WEBHOOK_TEMPLATE_TOKEN_RE = /\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g;
+
+function renderWebhookTemplate(template: string, vars: Record<string, string>): string {
+    if (typeof template !== "string" || !template) return "";
+    return template.replace(WEBHOOK_TEMPLATE_TOKEN_RE, (fullMatch, tokenKey?: string) => {
+        if (fullMatch === "{{") return "{";
+        if (fullMatch === "}}") return "}";
+        if (tokenKey && Object.prototype.hasOwnProperty.call(vars, tokenKey)) {
+            return vars[tokenKey] ?? "";
+        }
+        return fullMatch;
+    });
+}
+
+function normalizeUtcIsoTimestamp(raw: unknown): string | null {
+    if (typeof raw !== "string" || !raw.trim()) return null;
+    const ms = Date.parse(raw.trim());
+    if (!Number.isFinite(ms)) return null;
+    return new Date(ms).toISOString();
+}
+
+function validateWebhookTargetUrl(rawUrl: string): { ok: true; parsed: URL } | { ok: false; reason: string } {
+    if (typeof rawUrl !== "string" || !rawUrl.trim()) {
+        return { ok: false, reason: "Empty webhook URL" };
+    }
+    let parsed: URL;
+    try {
+        parsed = new URL(rawUrl.trim());
+    } catch {
+        return { ok: false, reason: "Invalid webhook URL syntax" };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return { ok: false, reason: "Unsupported webhook URL protocol (only http and https are allowed)" };
+    }
+    if (parsed.username !== "" || parsed.password !== "") {
+        return { ok: false, reason: "Embedded credentials are not allowed in webhook URL" };
+    }
+    if (parsed.hash !== "") {
+        return { ok: false, reason: "URL fragments (#) are not allowed in webhook URL" };
+    }
+    return { ok: true, parsed };
+}
+
+function isDiscordWebhookUrl(parsed: URL): boolean {
+    return (
+        /^(?:(?:ptb|canary)\.)?discord(?:app)?\.com$/i.test(parsed.hostname) &&
+        /^\/api\/(?:v\d+\/)?webhooks\/[^/]+\/[^/]+/i.test(parsed.pathname)
+    );
+}
+
+export async function sendCustomWebhookNotification(
+    event: IpcMainInvokeEvent,
+    options: CustomWebhookOptions
+): Promise<{ ok: boolean; status?: number; message?: string }> {
+    if (!options || typeof options !== "object") {
+        return { ok: false, message: "Invalid webhook options" };
+    }
+    const validation = validateWebhookTargetUrl(options.url);
+    if (!validation.ok) {
+        return { ok: false, message: validation.reason };
+    }
+
+    const targetUrl = new URL(validation.parsed.toString());
+    const eventType: WebhookEventType = options.eventType || "quest_completed";
+    const eventSuffix =
+        eventType === "quest_started"
+            ? "started"
+            : eventType === "reward_claimed"
+                ? "claimed"
+                : "completed";
+    const eventId = `${randomUUID()}:${eventSuffix}`;
+    const isoTimestamp = new Date().toISOString();
+    const locale = typeof options.locale === "string" && options.locale.trim() ? options.locale.trim() : "en";
+    const isTest = Boolean(options.isTest);
+    const isQueueEvent = eventType === "queue_completed";
+
+    const questName = isQueueEvent ? "" : String(options.questName || options.questId || "Unknown Quest");
+    const normalizedEstimate =
+        eventType === "quest_started" ? normalizeUtcIsoTimestamp(options.estimatedCompleteAt) : null;
+    const rewardImageRaw =
+        !isQueueEvent && typeof options.rewardImage === "string" && options.rewardImage.trim()
+            ? options.rewardImage.trim()
+            : null;
+
+    const queueStats: WebhookQueueStats | null = isQueueEvent
+        ? {
+            succeeded: Math.max(0, Math.floor(Number(options.queue?.succeeded) || 0)),
+            failed: Math.max(0, Math.floor(Number(options.queue?.failed) || 0)),
+            skipped: Math.max(0, Math.floor(Number(options.queue?.skipped) || 0))
+        }
+        : null;
+
+    const templateVars: Record<string, string> = {
+        "quest-name": questName,
+        "event-type": eventType,
+        "event-id": eventId,
+        "timestamp": isoTimestamp,
+        "estimated-complete-at": normalizedEstimate ?? "",
+        "reward-image": rewardImageRaw ?? "",
+        "succeeded": queueStats ? String(queueStats.succeeded) : "",
+        "failed": queueStats ? String(queueStats.failed) : "",
+        "skipped": queueStats ? String(queueStats.skipped) : ""
+    };
+
+    const defaultTitle = isQueueEvent ? "Queue processing completed" : "Discord Quest: {quest-name}";
+    const defaultContent = isQueueEvent
+        ? "Succeeded: {succeeded}; failed: {failed}; skipped: {skipped}"
+        : "[{event-type}] {quest-name} ({timestamp})";
+
+    const rawTitleTemplate =
+        typeof options.templateTitle === "string"
+            ? options.templateTitle
+            : defaultTitle;
+    const rawContentTemplate =
+        typeof options.templateContent === "string"
+            ? options.templateContent
+            : defaultContent;
+
+    const renderedTitle = renderWebhookTemplate(rawTitleTemplate, templateVars);
+    const renderedContent = renderWebhookTemplate(rawContentTemplate, templateVars);
+
+    const requestedFormat: WebhookFormatMode = options.format || "auto";
+    const discordTarget = isDiscordWebhookUrl(targetUrl);
+    const useDiscordFormat =
+        requestedFormat === "discord" ||
+        (requestedFormat === "auto" && discordTarget);
+
+    if (discordTarget && !targetUrl.searchParams.has("wait")) {
+        targetUrl.searchParams.set("wait", "true");
+    }
+
+    let payloadBody: Record<string, any>;
+    if (useDiscordFormat) {
+        const embedColor =
+            eventType === "quest_completed" || eventType === "queue_completed"
+                ? 0x57f287
+                : eventType === "reward_claimed"
+                    ? 0xfee75c
+                    : 0x5865f2;
+        const fields: Array<{ name: string; value: string; inline?: boolean }> = [];
+        if (!isQueueEvent) {
+            fields.push({ name: "Quest", value: questName.slice(0, 1024), inline: true });
+        }
+        fields.push({ name: "Event", value: eventType, inline: true });
+        if (!isQueueEvent && options.taskType) {
+            fields.push({ name: "Task", value: String(options.taskType).slice(0, 1024), inline: true });
+        }
+        if (normalizedEstimate) {
+            fields.push({ name: "Estimated Completion", value: normalizedEstimate.slice(0, 1024), inline: false });
+        }
+        if (queueStats) {
+            fields.push(
+                { name: "Succeeded", value: String(queueStats.succeeded), inline: true },
+                { name: "Failed", value: String(queueStats.failed), inline: true },
+                { name: "Skipped", value: String(queueStats.skipped), inline: true }
+            );
+        }
+        const embed: Record<string, any> = {
+            title: renderedTitle.slice(0, 256),
+            description: renderedContent.slice(0, 4096),
+            color: embedColor,
+            timestamp: isoTimestamp,
+            fields,
+            footer: { text: isTest ? `Test • ID: ${eventId}` : `ID: ${eventId}` }
+        };
+        if (rewardImageRaw && /^https:\/\//i.test(rewardImageRaw)) {
+            embed.thumbnail = { url: rewardImageRaw };
+        }
+        payloadBody = {
+            content: renderedContent.slice(0, 2000),
+            embeds: [embed],
+            allowed_mentions: { parse: [] }
+        };
+    } else {
+        payloadBody = {
+            schema_version: 1,
+            event_id: eventId,
+            event_type: eventType,
+            timestamp: isoTimestamp,
+            locale,
+            is_test: isTest,
+            title: renderedTitle,
+            content: renderedContent,
+            quest: isQueueEvent
+                ? null
+                : {
+                    name: questName,
+                    reward_image: rewardImageRaw,
+                    estimated_complete_at: normalizedEstimate
+                },
+            queue: queueStats
+        };
+    }
+
+    const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": resolveElectronUserAgent(event)
+    };
+
+    if (typeof options.bearerToken === "string" && options.bearerToken.trim().length > 0) {
+        const cleanToken = options.bearerToken.trim().replace(/^Bearer\s+/i, "").replace(/[\r\n]+/g, "");
+        if (cleanToken) {
+            headers.Authorization = `Bearer ${cleanToken}`;
+        }
+    }
+
+    try {
+        let res = await fetch(targetUrl.toString(), {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payloadBody),
+            redirect: "manual",
+            signal: AbortSignal.timeout(10000)
+        });
+        if (res.status === 429) {
+            const retryAfterHeader = res.headers.get("retry-after");
+            const retrySec = retryAfterHeader ? Number(retryAfterHeader) : 2;
+            if (Number.isFinite(retrySec) && retrySec > 0 && retrySec <= 5) {
+                await new Promise(r => setTimeout(r, Math.round(retrySec * 1000) + 250));
+                res = await fetch(targetUrl.toString(), {
+                    method: "POST",
+                    headers,
+                    body: JSON.stringify(payloadBody),
+                    redirect: "manual",
+                    signal: AbortSignal.timeout(10000)
+                });
+            }
+        }
+        await res.arrayBuffer().catch(() => null);
+        const isAccepted = res.status >= 200 && res.status < 300;
+        const statusSummary = isAccepted
+            ? (res.status === 202 ? "Submitted" : "Sent")
+            : (res.status >= 300 && res.status < 400
+                ? `Rejected HTTP redirect (${res.status})`
+                : `HTTP ${res.status}`);
+        return {
+            ok: isAccepted,
+            status: res.status,
+            message: statusSummary
+        };
+    } catch {
+        return {
+            ok: false,
+            message: "Webhook request failed or timed out"
+        };
+    }
+}
+
 
