@@ -514,7 +514,13 @@ async function sendCustomWebhook(opts) {
 	const bearer = opts.bearerToken || window.__QUEST_WEBHOOK_BEARER__;
 	if (bearer) headers["Authorization"] = `Bearer ${String(bearer).replace(/^Bearer\s+/i, "")}`;
 	try {
-		await fetch(targetUrl, { method: "POST", headers, body: JSON.stringify(payload) });
+		await fetch(targetUrl, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(payload),
+			redirect: "manual",
+			signal: AbortSignal.timeout(10000)
+		});
 	} catch {}
 }
 
@@ -603,8 +609,20 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 		});
 		for (const q of unaccepted) {
 			try {
-				await httpWithAnalytics.post({ url: `/quests/${q.id}/enroll`, body: { location: 1 } });
+				const enrollRes = await httpWithAnalytics.post({ url: `/quests/${q.id}/enroll`, body: { location: 1 } });
 				console.log(`Enrolled in quest: ${q.config?.messages?.questName || q.id}`);
+				if (enrollRes?.body?.user_status) {
+					q.userStatus = {
+						enrolledAt: enrollRes.body.user_status.enrolled_at || new Date().toISOString(),
+						completedAt: enrollRes.body.user_status.completed_at || null,
+						progress: enrollRes.body.user_status.progress || {}
+					};
+				} else if (enrollRes?.body?.userStatus) {
+					q.userStatus = enrollRes.body.userStatus;
+				} else {
+					q.userStatus = q.userStatus || {};
+					q.userStatus.enrolledAt = q.userStatus.enrolledAt || new Date().toISOString();
+				}
 				await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
 			} catch (enrollErr) {
 				console.warn(`Could not enroll in quest ${q.id}:`, enrollErr?.message || enrollErr);
@@ -612,7 +630,27 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 		}
 	}
 
-	let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
+	const allEnrolledUncompleted = [...QuestsStore.quests.values()].filter(x => {
+		if (!x?.userStatus?.enrolledAt || x?.userStatus?.completedAt) return false;
+		if (!x?.config?.expiresAt || new Date(x.config.expiresAt).getTime() <= Date.now()) return false;
+		return true;
+	});
+
+	const unsupported = allEnrolledUncompleted.filter(x => {
+		const tasks = (x?.config?.taskConfig ?? x?.config?.taskConfigV2)?.tasks;
+		return !tasks || !supportedTasks.some(y => tasks[y] != null);
+	});
+	if (unsupported.length > 0) {
+		queueStats.skipped += unsupported.length;
+		for (const u of unsupported) {
+			console.log(`[CompleteDiscordQuest] Skipping quest with unsupported task: ${u.config?.messages?.questName || u.id}`);
+		}
+	}
+
+	let quests = allEnrolledUncompleted.filter(x => {
+		const tasks = (x?.config?.taskConfig ?? x?.config?.taskConfigV2)?.tasks;
+		return tasks && supportedTasks.some(y => tasks[y] != null);
+	});
 
 	async function logAccountBadgeStats() {
 		try {
@@ -656,7 +694,13 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 
 	if (quests.length === 0) {
 		cleanupAuthListeners();
-		console.log("You don't have any uncompleted quests!");
+		if (queueStats.skipped > 0) {
+			notifyQuestEvent("queue_completed", null, undefined, undefined, queueStats);
+			console.log(`All quests finished! Succeeded: ${queueStats.succeeded}, Failed: ${queueStats.failed}, Skipped: ${queueStats.skipped}`);
+			await logAccountBadgeStats();
+		} else {
+			console.log("You don't have any uncompleted quests!");
+		}
 		return;
 	}
 
@@ -678,171 +722,161 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 		const observerId = ((nextObserverId++ - 1) % 32) + 1;
 		const currentUserId = UserStore?.getCurrentUser?.()?.id ?? "";
 
-		const questName = quest.config.messages.questName;
-		const taskConfig = quest.config.taskConfig ?? quest.config.taskConfigV2;
-		const taskName = supportedTasks.find(x => taskConfig.tasks[x] != null);
-		const taskData = taskConfig.tasks[taskName];
-		const applicationId = quest.config.application?.id ?? taskData.applications?.[0]?.id;
-		const secondsNeeded = taskData.target;
-		let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+		const questName = quest?.config?.messages?.questName || quest?.config?.messages?.gameTitle || quest?.id || "Quest";
+		const taskConfig = quest?.config?.taskConfig ?? quest?.config?.taskConfigV2;
+		const tasks = taskConfig?.tasks;
+		const taskName = supportedTasks.find(x => tasks?.[x] != null);
+		if (!taskName || !tasks?.[taskName]) {
+			console.warn(`[CompleteDiscordQuest] Skipping quest ${questName} with unsupported or missing task configuration.`);
+			queueStats.skipped++;
+			doJob();
+			return;
+		}
+		const taskData = tasks[taskName];
+		const applicationId = quest?.config?.application?.id ?? taskData?.applications?.[0]?.id;
+		const secondsNeeded = taskData?.target ?? 0;
+		let secondsDone = quest?.userStatus?.progress?.[taskName]?.value ?? 0;
 		const estimatedCompleteIso = new Date(Date.now() + Math.max(0, secondsNeeded - secondsDone) * 1000).toISOString();
 		notifyQuestEvent("quest_started", quest, taskName, estimatedCompleteIso);
 
 		if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
 			const maxFuture = 8, speed = 10, interval = 10;
-			const enrolledAt = new Date(quest.userStatus.enrolledAt).getTime();
+			const enrolledAt = quest?.userStatus?.enrolledAt ? new Date(quest.userStatus.enrolledAt).getTime() : Date.now();
 			const sessionStartMs = Date.now();
 			const initialProgress = secondsDone;
 			let completed = false;
 			let fn = async () => {
-				while (true) {
-					const anchorMs = Math.max(enrolledAt, sessionStartMs - maxFuture * 1000);
-					const maxAllowed = initialProgress + Math.floor((Date.now() - anchorMs) / 1000) + maxFuture;
-					const diff = maxAllowed - secondsDone;
-					const timestamp = Math.min(secondsNeeded, secondsDone + speed);
+				try {
+					while (true) {
+						if (isTerminated) return;
+						const anchorMs = Math.max(enrolledAt, sessionStartMs - maxFuture * 1000);
+						const maxAllowed = initialProgress + Math.floor((Date.now() - anchorMs) / 1000) + maxFuture;
+						const diff = maxAllowed - secondsDone;
+						const timestamp = Math.min(secondsNeeded, secondsDone + speed);
 
-					if (diff >= speed || timestamp >= secondsNeeded) {
-						const isFinalStep = timestamp >= secondsNeeded;
-						const jitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
-						const reportedTs = isFinalStep
-							? secondsNeeded
-							: Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
-						const res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: reportedTs } });
-						completed = res.body?.completed_at != null;
-						secondsDone = Math.min(secondsNeeded, Math.floor(reportedTs));
-					}
+						if (diff >= speed || timestamp >= secondsNeeded) {
+							const isFinalStep = timestamp >= secondsNeeded;
+							const jitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
+							const reportedTs = isFinalStep
+								? secondsNeeded
+								: Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
+							const res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: reportedTs } });
+							completed = res?.body?.completed_at != null;
+							secondsDone = Math.min(secondsNeeded, Math.floor(reportedTs));
+						}
 
-					if (completed || secondsDone >= secondsNeeded - 1) {
-						break;
+						if (completed || secondsDone >= secondsNeeded - 1) {
+							break;
+						}
+						const jitterMs = Math.floor(Math.random() * 1500);
+						await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
 					}
-					const jitterMs = Math.floor(Math.random() * 1500);
-					await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
+					if (!completed && !isTerminated) {
+						await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } });
+					}
+					console.log("Quest completed!");
+					queueStats.succeeded++;
+					notifyQuestEvent("quest_completed", quest, taskName);
+					await claimQuestReward(quest);
+				} catch (err) {
+					console.error(`[CompleteDiscordQuest] Video quest failed for ${questName}:`, err?.message || err);
+					queueStats.failed++;
+				} finally {
+					doJob();
 				}
-				if (!completed) {
-					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: secondsNeeded } });
-				}
-				console.log("Quest completed!");
-				queueStats.succeeded++;
-				notifyQuestEvent("quest_completed", quest, taskName);
-				await claimQuestReward(quest);
-				doJob();
 			};
 			fn();
 			console.log(`Spoofing video for ${questName} (1x real-time stealth pacing).`);
 		} else if (taskName === "PLAY_ON_DESKTOP") {
 			if (!isApp) {
 				console.log("This no longer works in browser for non-video quests. Use the discord desktop app to complete the", questName, "quest!");
-			} else {
-				api.get({ url: `/applications/public?application_ids=${applicationId}` }).then(async res => {
-					const appData = res.body[0];
-					const rawExe = appData.executables?.find(x => x.os === "win32")?.name?.replace(/^>+/, "") ?? `${appData.name.replace(/[\/\\:*?"<>|]/g, "")}.exe`;
-					const cleanAppFolder = appData.name.replace(/[\/\\:*?"<>|]/g, "").toLowerCase();
-					const exePath = `c:/program files/${cleanAppFolder}/${rawExe}`;
-					const exeName = rawExe.split(/[\/\\]/).pop() || rawExe;
-					const executableFingerprint = await synthesizeSignedExecutableFingerprint(currentUserId, applicationId, exePath, appData.publishers?.[0]?.name, appData.name);
-
-					const fakeGame = {
-						cmdLine: `"C:\\Program Files\\${appData.name}\\${rawExe.replace(/\//g, "\\")}"`,
-						distributor: null,
-						elevated: false,
-						exeName,
-						exePath,
-						executableFingerprint,
-						fullscreenType: 0,
-						gameMetadata: undefined,
-						hidden: false,
-						id: applicationId,
-						isLauncher: false,
-						lastFocused: Math.floor(Date.now() / 1000),
-						name: appData.name,
-						nativeProcessObserverId: observerId,
-						origGameName: appData.name,
-						pid: pid,
-						pidPath: [pid],
-						processName: exeName.replace(/\.exe$/i, ""),
-						sandboxed: false,
-						sku: null,
-						start: Date.now() - Math.floor(Math.random() * 8000 + 2000),
-						windowHandle: String(pid * 4 + 65536),
-					};
-					const rawGetRunningGames = RunningGameStore.getRunningGames;
-					const rawGetGameForPID = RunningGameStore.getGameForPID;
-					const realGetRunningGames = rawGetRunningGames.bind(RunningGameStore);
-					const realGetGameForPID = rawGetGameForPID.bind(RunningGameStore);
-					let activeSpoof = true;
-					let stoppedAt = 0;
-					const mergeFakeGames = cloakFunction(() => {
-						const current = realGetRunningGames() ?? [];
-						if (!activeSpoof) return current;
-						return current.some(g => g.id === fakeGame.id || g.pid === fakeGame.pid) ? current : [...current, fakeGame];
-					}, rawGetRunningGames, "getRunningGames");
-					RunningGameStore.getRunningGames = mergeFakeGames;
-					RunningGameStore.getGameForPID = cloakFunction((p) => {
-						const numPid = Number(p);
-						return mergeFakeGames().find(x => x.pid === numPid) ?? (!activeSpoof && Date.now() - stoppedAt < 15000 && fakeGame.pid === numPid ? fakeGame : realGetGameForPID(p));
-					}, rawGetGameForPID, "getGameForPID");
-					FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [], added: [fakeGame], games: mergeFakeGames() });
-
-					let fn = async data => {
-						if (data.questId && data.questId !== quest.id) return;
-						let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
-						console.log(`Quest progress: ${progress}/${secondsNeeded}`);
-
-						if (progress >= secondsNeeded) {
-							console.log("Quest completed!");
-							queueStats.succeeded++;
-							notifyQuestEvent("quest_completed", quest, taskName);
-							await claimQuestReward(quest);
-
-							FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-
-							const rawKeepAlive = Number(window.__QUEST_KEEP_ALIVE_MINUTES__);
-							const keepAliveEnabled = window.__QUEST_KEEP_ALIVE_ENABLED__ !== false;
-							const keepAliveMinutes = Number.isFinite(rawKeepAlive) && rawKeepAlive >= 0
-								? rawKeepAlive
-								: (keepAliveEnabled ? (4 + Math.random() * 4) : 0);
-							const keepAliveMs = Math.round(keepAliveMinutes * 60_000);
-
-							const teardownGame = () => {
-								activeSpoof = false;
-								stoppedAt = Date.now();
-								FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: realGetRunningGames() });
-								setTimeout(() => {
-									if (RunningGameStore.getRunningGames === mergeFakeGames) {
-										RunningGameStore.getRunningGames = rawGetRunningGames;
-										RunningGameStore.getGameForPID = rawGetGameForPID;
-									}
-								}, 15000);
-								doJob();
-							};
-
-							if (keepAliveMs > 0) {
-								console.log(`Keeping ${appData.name} active for ${Math.round(keepAliveMs / 1000)}s post-quest cooldown...`);
-								setTimeout(teardownGame, keepAliveMs);
-							} else {
-								teardownGame();
-							}
-						}
-					};
-					FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-
-					console.log(`Spoofed your game to ${appData.name} (2-segment path: ${formatQuestExecutablePath(exePath)}, 196-char signed executableFingerprint attached). Wait for ${Math.ceil((secondsNeeded - secondsDone) / 60)} more minutes.`);
-				});
+				queueStats.skipped++;
+				doJob();
+				return;
 			}
-		} else if (taskName === "STREAM_ON_DESKTOP") {
-			if (!isApp) {
-				console.log("This no longer works in browser for non-video quests. Use the discord desktop app to complete the", questName, "quest!");
-			} else {
-				let realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
-				ApplicationStreamingStore.getStreamerActiveStreamMetadata = cloakFunction(() => ({
+			if (!RunningGameStore?.getRunningGames || !FluxDispatcher?.dispatch) {
+				console.warn("[CompleteDiscordQuest] RunningGameStore or FluxDispatcher not available, skipping desktop game quest.");
+				queueStats.skipped++;
+				doJob();
+				return;
+			}
+			api.get({ url: `/applications/public?application_ids=${applicationId}` }).then(async res => {
+				const appData = res?.body?.[0];
+				if (!appData || !appData.name) {
+					console.warn(`[CompleteDiscordQuest] Application data not found for ${applicationId}, skipping.`);
+					queueStats.failed++;
+					doJob();
+					return;
+				}
+				const rawExe = appData.executables?.find(x => x.os === "win32")?.name?.replace(/^>+/, "") ?? `${appData.name.replace(/[\/\\:*?"<>|]/g, "")}.exe`;
+				const cleanAppFolder = appData.name.replace(/[\/\\:*?"<>|]/g, "").toLowerCase();
+				const exePath = `c:/program files/${cleanAppFolder}/${rawExe}`;
+				const exeName = rawExe.split(/[\/\\]/).pop() || rawExe;
+				const executableFingerprint = await synthesizeSignedExecutableFingerprint(currentUserId, applicationId, exePath, appData.publishers?.[0]?.name, appData.name);
+
+				const fakeGame = {
+					cmdLine: `"C:\\Program Files\\${appData.name}\\${rawExe.replace(/\//g, "\\")}"`,
+					distributor: null,
+					elevated: false,
+					exeName,
+					exePath,
+					executableFingerprint,
+					fullscreenType: 0,
+					gameMetadata: undefined,
+					hidden: false,
 					id: applicationId,
-					pid,
-					sourceName: null
-				}), realFunc, "getStreamerActiveStreamMetadata");
+					isLauncher: false,
+					lastFocused: Math.floor(Date.now() / 1000),
+					name: appData.name,
+					nativeProcessObserverId: observerId,
+					origGameName: appData.name,
+					pid: pid,
+					pidPath: [pid],
+					processName: exeName.replace(/\.exe$/i, ""),
+					sandboxed: false,
+					sku: null,
+					start: Date.now() - Math.floor(Math.random() * 8000 + 2000),
+					windowHandle: String(pid * 4 + 65536),
+				};
+				const rawGetRunningGames = RunningGameStore.getRunningGames;
+				const rawGetGameForPID = RunningGameStore.getGameForPID;
+				const realGetRunningGames = rawGetRunningGames.bind(RunningGameStore);
+				const realGetGameForPID = rawGetGameForPID.bind(RunningGameStore);
+				let activeSpoof = true;
+				let stoppedAt = 0;
+				const mergeFakeGames = cloakFunction(() => {
+					const current = realGetRunningGames() ?? [];
+					if (!activeSpoof) return current;
+					return current.some(g => g.id === fakeGame.id || g.pid === fakeGame.pid) ? current : [...current, fakeGame];
+				}, rawGetRunningGames, "getRunningGames");
+				RunningGameStore.getRunningGames = mergeFakeGames;
+				RunningGameStore.getGameForPID = cloakFunction((p) => {
+					const numPid = Number(p);
+					return mergeFakeGames().find(x => x.pid === numPid) ?? (!activeSpoof && Date.now() - stoppedAt < 15000 && fakeGame.pid === numPid ? fakeGame : realGetGameForPID(p));
+				}, rawGetGameForPID, "getGameForPID");
+				FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [], added: [fakeGame], games: mergeFakeGames() });
+
+				const teardownGame = () => {
+					if (!activeSpoof && stoppedAt > 0) return;
+					activeSpoof = false;
+					stoppedAt = Date.now();
+					FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: realGetRunningGames() });
+					setTimeout(() => {
+						if (RunningGameStore.getRunningGames === mergeFakeGames) {
+							RunningGameStore.getRunningGames = rawGetRunningGames;
+							RunningGameStore.getGameForPID = rawGetGameForPID;
+						}
+					}, 15000);
+				};
 
 				let fn = async data => {
+					if (isTerminated) {
+						FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+						teardownGame();
+						return;
+					}
 					if (data.questId && data.questId !== quest.id) return;
-					let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+					let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.PLAY_ON_DESKTOP.value);
 					console.log(`Quest progress: ${progress}/${secondsNeeded}`);
 
 					if (progress >= secondsNeeded) {
@@ -851,17 +885,81 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 						notifyQuestEvent("quest_completed", quest, taskName);
 						await claimQuestReward(quest);
 
-						ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
 						FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
 
-						doJob();
+						const rawKeepAlive = Number(window.__QUEST_KEEP_ALIVE_MINUTES__);
+						const keepAliveEnabled = window.__QUEST_KEEP_ALIVE_ENABLED__ !== false;
+						const keepAliveMinutes = Number.isFinite(rawKeepAlive) && rawKeepAlive >= 0
+							? rawKeepAlive
+							: (keepAliveEnabled ? (4 + Math.random() * 4) : 0);
+						const keepAliveMs = Math.round(keepAliveMinutes * 60_000);
+
+						if (keepAliveMs > 0) {
+							console.log(`Keeping ${appData.name} active for ${Math.round(keepAliveMs / 1000)}s post-quest cooldown...`);
+							setTimeout(() => {
+								teardownGame();
+								doJob();
+							}, keepAliveMs);
+						} else {
+							teardownGame();
+							doJob();
+						}
 					}
 				};
 				FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
 
-				console.log(`Spoofed your stream to the target game. Stream any window in vc for ${Math.ceil((secondsNeeded - secondsDone) / 60)} more minutes.`);
-				console.log("Remember that you need at least 1 other person to be in the vc!");
+				console.log(`Spoofed your game to ${appData.name} (2-segment path: ${formatQuestExecutablePath(exePath)}, 196-char signed executableFingerprint attached). Wait for ${Math.ceil((secondsNeeded - secondsDone) / 60)} more minutes.`);
+			}).catch(err => {
+				console.error(`[CompleteDiscordQuest] Failed to prepare desktop game quest for ${questName}:`, err?.message || err);
+				queueStats.failed++;
+				doJob();
+			});
+		} else if (taskName === "STREAM_ON_DESKTOP") {
+			if (!isApp) {
+				console.log("This no longer works in browser for non-video quests. Use the discord desktop app to complete the", questName, "quest!");
+				queueStats.skipped++;
+				doJob();
+				return;
 			}
+			if (!ApplicationStreamingStore?.getStreamerActiveStreamMetadata || !FluxDispatcher?.subscribe) {
+				console.warn("[CompleteDiscordQuest] ApplicationStreamingStore or FluxDispatcher not available, skipping stream quest.");
+				queueStats.skipped++;
+				doJob();
+				return;
+			}
+			let realFunc = ApplicationStreamingStore.getStreamerActiveStreamMetadata;
+			ApplicationStreamingStore.getStreamerActiveStreamMetadata = cloakFunction(() => ({
+				id: applicationId,
+				pid,
+				sourceName: null
+			}), realFunc, "getStreamerActiveStreamMetadata");
+
+			let fn = async data => {
+				if (isTerminated) {
+					ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
+					FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+					return;
+				}
+				if (data.questId && data.questId !== quest.id) return;
+				let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
+				console.log(`Quest progress: ${progress}/${secondsNeeded}`);
+
+				if (progress >= secondsNeeded) {
+					console.log("Quest completed!");
+					queueStats.succeeded++;
+					notifyQuestEvent("quest_completed", quest, taskName);
+					await claimQuestReward(quest);
+
+					ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
+					FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+
+					doJob();
+				}
+			};
+			FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
+
+			console.log(`Spoofed your stream to the target game. Stream any window in vc for ${Math.ceil((secondsNeeded - secondsDone) / 60)} more minutes.`);
+			console.log("Remember that you need at least 1 other person to be in the vc!");
 		} else if (taskName === "PLAY_ACTIVITY" || taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME") {
 			const channelId = ChannelStore?.getSortedPrivateChannels?.()?.[0]?.id
 				?? (Object.values(GuildChannelStore?.getAllGuilds?.() ?? {})).find(x => x != null && Array.isArray(x?.VOCAL) && x.VOCAL.length > 0)?.VOCAL?.[0]?.channel?.id
@@ -1236,7 +1334,6 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 								queueStats.succeeded++;
 								notifyQuestEvent("quest_completed", quest, taskName);
 								await claimQuestReward(quest);
-								doJob();
 								return;
 							}
 						}
@@ -1281,6 +1378,9 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 
 						await new Promise(resolve => setTimeout(resolve, (20 * 1000) + Math.floor(Math.random() * 1500)));
 					}
+				} catch (err) {
+					console.error(`[CompleteDiscordQuest] Activity quest failed for ${questName}:`, err?.message || err);
+					queueStats.failed++;
 				} finally {
 					if (autoLaunchedFrameId && applicationId) {
 						try {
@@ -1290,11 +1390,14 @@ const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
 					for (const [statusObj, val] of origEnrolledAt.entries()) {
 						try { statusObj.enrolledAt = val; } catch {}
 					}
+					doJob();
 				}
-
-				doJob();
 			};
 			fn();
+		} else {
+			console.warn(`[CompleteDiscordQuest] Unsupported task type "${taskName}" for ${questName}, skipping.`);
+			queueStats.skipped++;
+			doJob();
 		}
 	};
 	doJob();

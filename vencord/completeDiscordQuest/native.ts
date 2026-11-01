@@ -2013,11 +2013,12 @@ export async function sendCustomWebhookNotification(
             }
         }
         await res.arrayBuffer().catch(() => null);
-        const isAccepted = res.status >= 200 && res.status < 300;
+        const isRedirect = (res.status >= 300 && res.status < 400) || res.type === "opaqueredirect";
+        const isAccepted = !isRedirect && res.status >= 200 && res.status < 300;
         const statusSummary = isAccepted
             ? (res.status === 202 ? "Submitted" : "Sent")
-            : (res.status >= 300 && res.status < 400
-                ? `Rejected HTTP redirect (${res.status})`
+            : (isRedirect
+                ? `Rejected HTTP redirect (${res.status || 300})`
                 : `HTTP ${res.status}`);
         return {
             ok: isAccepted,

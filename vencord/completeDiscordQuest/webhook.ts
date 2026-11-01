@@ -125,8 +125,21 @@ export async function sendRendererWebhookNotification(opts: WebhookNotificationO
         if (opts.bearerToken) {
             headers["Authorization"] = `Bearer ${String(opts.bearerToken).replace(/^Bearer\s+/i, "")}`;
         }
-        const resp = await fetch(targetUrl, { method: "POST", headers, body: JSON.stringify(payload) });
-        return { ok: resp.ok, status: resp.status, message: resp.ok ? "Delivered" : `HTTP ${resp.status}` };
+        const resp = await fetch(targetUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+            redirect: "manual",
+            signal: AbortSignal.timeout(10000)
+        });
+        const isRedirect = resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400);
+        const isAccepted = !isRedirect && resp.ok && resp.status >= 200 && resp.status < 300;
+        const statusSummary = isAccepted
+            ? (resp.status === 202 ? "Submitted" : "Delivered")
+            : (isRedirect
+                ? `Rejected HTTP redirect (${resp.status || 300})`
+                : `HTTP ${resp.status}`);
+        return { ok: isAccepted, status: resp.status, message: statusSummary };
     } catch (e: any) {
         return { ok: false, message: e?.message || "Delivery failed" };
     }
