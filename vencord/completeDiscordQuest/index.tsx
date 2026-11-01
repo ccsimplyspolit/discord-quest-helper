@@ -1233,10 +1233,12 @@ export default definePlugin({
         try {
             FluxDispatcher.subscribe("LOGOUT", onLogout);
             FluxDispatcher.subscribe("CONNECTION_OPEN", onConnectionOpen);
+            FluxDispatcher.subscribe("CURRENT_USER_UPDATE", onConnectionOpen);
             storeCleanupCallbacks.push(() => {
                 try {
                     FluxDispatcher.unsubscribe("LOGOUT", onLogout);
                     FluxDispatcher.unsubscribe("CONNECTION_OPEN", onConnectionOpen);
+                    FluxDispatcher.unsubscribe("CURRENT_USER_UPDATE", onConnectionOpen);
                 } catch {}
             });
         } catch {}
@@ -1605,13 +1607,13 @@ function updateQuests() {
             const tName = SUPPORTED_TASK_NAMES.find(x => (tc.tasks as any)[x] != null);
             if (!tName) continue;
             const isVideo = tName === "WATCH_VIDEO" || tName === "WATCH_VIDEO_ON_MOBILE";
-            const isAchievement = tName === "ACHIEVEMENT_IN_ACTIVITY" || tName === "ACHIEVEMENT_IN_GAME";
+            const isActivity = tName === "PLAY_ACTIVITY" || tName === "ACHIEVEMENT_IN_ACTIVITY" || tName === "ACHIEVEMENT_IN_GAME";
             if (isVideo) {
                 if (hasActiveVideo) continue;
                 hasActiveVideo = true;
                 completeQuest(quest);
-            } else if (isAchievement) {
-                if (hasActiveActivity || attemptedAchievementQuestIds.has(quest.id)) continue;
+            } else if (isActivity) {
+                if (hasActiveActivity || (tName !== "PLAY_ACTIVITY" && attemptedAchievementQuestIds.has(quest.id))) continue;
                 hasActiveActivity = true;
                 completeQuest(quest);
             } else {
@@ -1959,7 +1961,8 @@ function completeQuest(quest: QuestValue) {
 
         const isVideoTask = taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE";
         const isAchievementTask = taskName === "ACHIEVEMENT_IN_ACTIVITY" || taskName === "ACHIEVEMENT_IN_GAME";
-        completingQuest.set(quest.id, isVideoTask ? "video" : (isAchievementTask ? "activity" : "game"));
+        const isActivityTask = taskName === "PLAY_ACTIVITY" || isAchievementTask;
+        completingQuest.set(quest.id, isVideoTask ? "video" : (isActivityTask ? "activity" : "game"));
 
         const estimatedCompleteIso = new Date(Date.now() + Math.max(0, secondsNeeded - secondsDone) * 1000).toISOString();
 
@@ -2004,8 +2007,11 @@ function completeQuest(quest: QuestValue) {
 
                             if (diff >= speed || nextStep >= secondsNeeded) {
                                 const isFinalStep = nextStep >= secondsNeeded;
-                                const jitter = isFinalStep ? 0 : Number((0.12 + Math.random() * 0.76).toFixed(3));
-                                const sendTs = isFinalStep ? secondsNeeded : Math.min(secondsNeeded, Number((nextStep + jitter).toFixed(3)));
+                                const subSecJitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
+                                const finalFloatOffset = Number((0.015 + Math.random() * 0.045).toFixed(3));
+                                const sendTs = isFinalStep
+                                    ? Number((secondsNeeded + finalFloatOffset).toFixed(3))
+                                    : Math.min(Number((secondsNeeded - 0.01).toFixed(3)), Number((nextStep + subSecJitter).toFixed(3)));
                                 try {
                                     completed = await sendVideoProgress(sendTs);
                                     secondsDone = Math.min(secondsNeeded, Math.floor(sendTs));
@@ -2026,14 +2032,15 @@ function completeQuest(quest: QuestValue) {
                             await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
                         }
                         if (!completed && completingQuest.get(quest.id)) {
+                            const finalCompletionTs = Number((secondsNeeded + 0.018 + Math.random() * 0.032).toFixed(3));
                             try {
-                                completed = await sendVideoProgress(secondsNeeded);
+                                completed = await sendVideoProgress(finalCompletionTs);
                             } catch (finalErr: any) {
                                 if (finalErr?.status === 429) {
                                     const retryMs = ((finalErr?.body?.retry_after as number) || 5) * 1000 + 500;
                                     await new Promise(resolve => setTimeout(resolve, retryMs));
                                     if (completingQuest.get(quest.id)) {
-                                        completed = await sendVideoProgress(secondsNeeded);
+                                        completed = await sendVideoProgress(finalCompletionTs);
                                     }
                                 }
                             }
@@ -2478,7 +2485,6 @@ function completeQuest(quest: QuestValue) {
                             if (!isAchievementTask && typeof QuestSendHeartbeatAction === "function") {
                                 await QuestSendHeartbeatAction({
                                     questId: quest.id,
-                                    streamKey,
                                     applicationId: applicationId ? String(applicationId) : undefined,
                                     terminal: false
                                 });
@@ -2491,7 +2497,6 @@ function completeQuest(quest: QuestValue) {
                                     || progress >= secondsNeeded;
                             } else {
                                 const body: Record<string, any> = {
-                                    stream_key: streamKey,
                                     terminal: false
                                 };
                                 if (applicationId) {
@@ -2505,8 +2510,7 @@ function completeQuest(quest: QuestValue) {
                                         FluxDispatcher.dispatch({
                                             type: "QUESTS_SEND_HEARTBEAT_SUCCESS",
                                             userStatus: res.body,
-                                            questId: quest.id,
-                                            streamKey
+                                            questId: quest.id
                                         });
                                     }
                                 } catch (hbErr: any) {
@@ -2543,13 +2547,11 @@ function completeQuest(quest: QuestValue) {
                                     if (!isAchievementTask && typeof QuestSendHeartbeatAction === "function") {
                                         await QuestSendHeartbeatAction({
                                             questId: quest.id,
-                                            streamKey,
                                             applicationId: applicationId ? String(applicationId) : undefined,
                                             terminal: true
                                         }).catch(() => null);
                                     } else {
                                         const termBody: Record<string, any> = {
-                                            stream_key: streamKey,
                                             terminal: true
                                         };
                                         if (applicationId) {

@@ -148,7 +148,7 @@ function cloakFunction(fn, originalFn, fallbackName = "") {
 
 // 2. Scrub the 12 client-mod / DevTools detection bits [0,19,27,36,43,52,66,72,79,89,103,116] from X-Super-Properties launch_signature
 (() => {
-	const MOD_BITS = [0, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
+	const MOD_BITS = [0, 8, 19, 27, 36, 43, 52, 66, 72, 79, 89, 103, 116];
 	function scrubLaunchSignatureUuid(uuid) {
 		if (typeof uuid !== "string" || uuid.length !== 36) return uuid;
 		const hex = uuid.replace(/-/g, "");
@@ -440,16 +440,200 @@ async function synthesizeSignedExecutableFingerprint(userId, appId, exePath, exp
 	return btoa(binary);
 }
 
+// Webhook & external notification helpers (aligned with Custom Webhook Schema v1 & Discord Cards)
+function normalizeUtcIso(raw) {
+	if (typeof raw !== "string" || !raw.trim()) return null;
+	const ms = Date.parse(raw.trim());
+	return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+function renderWebhookTemplate(template, vars) {
+	if (typeof template !== "string" || !template) return "";
+	return template.replace(/\{\{|\}\}|\{(quest-name|event-type|event-id|timestamp|estimated-complete-at|reward-image|succeeded|failed|skipped)\}/g, (m, k) => {
+		if (m === "{{") return "{";
+		if (m === "}}") return "}";
+		return (k && k in vars) ? vars[k] : m;
+	});
+}
+function isDiscordWebhookUrl(urlStr) {
+	try {
+		const u = new URL(urlStr);
+		return /^(?:(?:ptb|canary)\.)?discord(?:app)?\.com$/i.test(u.hostname) && /^\/api\/(?:v\d+\/)?webhooks\/[^/]+\/[^/]+/i.test(u.pathname);
+	} catch { return false; }
+}
+async function sendCustomWebhook(opts) {
+	const url = opts.url || window.__QUEST_WEBHOOK_URL__;
+	if (!url || typeof url !== "string") return;
+	const isQueue = opts.eventType === "queue_completed";
+	const eventId = `${crypto.randomUUID()}:${isQueue ? "completed" : opts.eventType === "quest_started" ? "started" : opts.eventType === "reward_claimed" ? "claimed" : "completed"}`;
+	const isoTimestamp = new Date().toISOString();
+	const locale = (typeof navigator !== "undefined" && navigator.language) || "en";
+	const questName = isQueue ? "" : String(opts.questName || opts.questId || "Quest");
+	const normalizedEstimate = opts.eventType === "quest_started" ? normalizeUtcIso(opts.estimatedCompleteAt) : null;
+	const queueStats = opts.queue || null;
+
+	const templateVars = {
+		"quest-name": questName,
+		"event-type": opts.eventType,
+		"event-id": eventId,
+		"timestamp": isoTimestamp,
+		"estimated-complete-at": normalizedEstimate ?? "",
+		"reward-image": opts.rewardImage ?? "",
+		"succeeded": queueStats ? String(queueStats.succeeded) : "",
+		"failed": queueStats ? String(queueStats.failed) : "",
+		"skipped": queueStats ? String(queueStats.skipped) : ""
+	};
+
+	const defaultTitle = isQueue ? "Queue processing completed" : "Discord Quest: {quest-name}";
+	const defaultContent = isQueue ? "Succeeded: {succeeded}; failed: {failed}; skipped: {skipped}" : "[{event-type}] {quest-name} ({timestamp})";
+	const renderedTitle = renderWebhookTemplate(opts.templateTitle || window.__QUEST_WEBHOOK_TITLE__ || defaultTitle, templateVars);
+	const renderedContent = renderWebhookTemplate(opts.templateContent || window.__QUEST_WEBHOOK_CONTENT__ || defaultContent, templateVars);
+
+	const discordTarget = isDiscordWebhookUrl(url);
+	const reqFormat = opts.format || window.__QUEST_WEBHOOK_FORMAT__ || (discordTarget ? "discord" : "dqh_v1");
+	const useDiscord = reqFormat === "discord" || (reqFormat === "auto" && discordTarget);
+
+	let targetUrl = url;
+	if (discordTarget && !targetUrl.includes("wait=")) {
+		targetUrl += (targetUrl.includes("?") ? "&" : "?") + "wait=true";
+	}
+
+	let payload;
+	if (useDiscord) {
+		const embedColor = opts.eventType === "quest_completed" || isQueue ? 0x57f287 : opts.eventType === "reward_claimed" ? 0xfee75c : 0x5865f2;
+		const fields = [];
+		if (!isQueue) fields.push({ name: "Quest", value: questName.slice(0, 1024), inline: true });
+		fields.push({ name: "Event", value: opts.eventType, inline: true });
+		if (!isQueue && opts.taskType) fields.push({ name: "Task", value: String(opts.taskType).slice(0, 1024), inline: true });
+		if (normalizedEstimate) fields.push({ name: "Estimated Completion", value: normalizedEstimate.slice(0, 1024), inline: false });
+		if (queueStats) {
+			fields.push(
+				{ name: "Succeeded", value: String(queueStats.succeeded), inline: true },
+				{ name: "Failed", value: String(queueStats.failed), inline: true },
+				{ name: "Skipped", value: String(queueStats.skipped), inline: true }
+			);
+		}
+		payload = {
+			content: renderedContent.slice(0, 2000),
+			embeds: [{
+				title: renderedTitle.slice(0, 256),
+				description: renderedContent.slice(0, 4096),
+				color: embedColor,
+				timestamp: isoTimestamp,
+				fields,
+				footer: { text: `ID: ${eventId}` }
+			}],
+			allowed_mentions: { parse: [] }
+		};
+	} else {
+		payload = {
+			schema_version: 1,
+			event_id: eventId,
+			event_type: opts.eventType,
+			timestamp: isoTimestamp,
+			locale,
+			is_test: false,
+			title: renderedTitle,
+			content: renderedContent,
+			quest: isQueue ? null : { name: questName, reward_image: opts.rewardImage || null, estimated_complete_at: normalizedEstimate },
+			queue: queueStats
+		};
+	}
+	const headers = { "Content-Type": "application/json", "Accept": "application/json, text/plain, */*" };
+	const bearer = opts.bearerToken || window.__QUEST_WEBHOOK_BEARER__;
+	if (bearer) headers["Authorization"] = `Bearer ${String(bearer).replace(/^Bearer\s+/i, "")}`;
+	try {
+		await fetch(targetUrl, { method: "POST", headers, body: JSON.stringify(payload) });
+	} catch {}
+}
+
+const notifyQuestEvent = (eventType, quest, taskType, estimatedCompleteAt, queueStats) => {
+	const url = window.__QUEST_WEBHOOK_URL__
+		|| window.Vencord?.Settings?.plugins?.CompleteDiscordQuest?.webhookUrl
+		|| window.Vencord?.Settings?.plugins?.DiscordStealthGuard?.webhookUrl;
+	if (!url) return;
+	const isEnabled = window.__QUEST_WEBHOOK_ENABLED__ !== false
+		&& (window.Vencord?.Settings?.plugins?.CompleteDiscordQuest?.webhookEnabled ?? true);
+	if (!isEnabled) return;
+	const questName = quest?.config?.messages?.questName || quest?.config?.messages?.gameTitle || quest?.id || "";
+	let rewardImage = null;
+	try {
+		const r = quest?.config?.rewardsConfig?.rewards?.[0];
+		rewardImage = r?.asset || quest?.config?.assets?.hero || null;
+		if (rewardImage && !rewardImage.startsWith("http") && quest?.id) {
+			rewardImage = `https://cdn.discordapp.com/quests/${quest.id}/${rewardImage.replace(/^\/+/, "")}`;
+		}
+	} catch {}
+	sendCustomWebhook({
+		url,
+		eventType,
+		questId: quest?.id,
+		questName,
+		taskType,
+		estimatedCompleteAt,
+		rewardImage,
+		queue: queueStats
+	});
+};
+
+const claimQuestReward = async (quest) => {
+	if (window.__QUEST_AUTO_CLAIM__ === false || !quest?.id) return;
+	try {
+		const platforms = quest?.config?.rewardsConfig?.platforms;
+		const platform = resolvePreferredRewardPlatform(platforms);
+		await httpWithAnalytics.post({
+			url: `/quests/${quest.id}/claim-reward`,
+			body: { platform, location: 1 }
+		});
+		console.log(`Claimed reward for ${quest.config?.messages?.questName || quest.id} (platform: ${platform})`);
+		notifyQuestEvent("reward_claimed", quest);
+	} catch (err) {
+		console.warn(`Failed to claim reward for ${quest.id}:`, err?.message || err);
+	}
+};
+
 const supportedTasks = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO_ON_MOBILE", "ACHIEVEMENT_IN_ACTIVITY", "ACHIEVEMENT_IN_GAME"];
-let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
-let isApp = typeof DiscordNative !== "undefined";
+const isApp = typeof DiscordNative !== "undefined";
 let nextObserverId = 1;
-if (quests.length === 0) {
-	console.log("You don't have any uncompleted quests!");
-} else {
+const queueStats = { succeeded: 0, failed: 0, skipped: 0 };
+
+(async () => {
+	if (!QuestsStore?.quests) {
+		console.log("QuestsStore not found!");
+		return;
+	}
+
+	if (window.__QUEST_AUTO_ENROLL__ !== false) {
+		const unaccepted = [...QuestsStore.quests.values()].filter(x => {
+			if (!x?.config?.expiresAt || new Date(x.config.expiresAt).getTime() <= Date.now()) return false;
+			if (x.userStatus?.completedAt || x.userStatus?.enrolledAt) return false;
+			const tasks = (x.config.taskConfig ?? x.config.taskConfigV2)?.tasks;
+			return tasks && supportedTasks.some(y => tasks[y] != null);
+		});
+		for (const q of unaccepted) {
+			try {
+				await httpWithAnalytics.post({ url: `/quests/${q.id}/enroll`, body: { location: 1 } });
+				console.log(`Enrolled in quest: ${q.config?.messages?.questName || q.id}`);
+				await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
+			} catch (enrollErr) {
+				console.warn(`Could not enroll in quest ${q.id}:`, enrollErr?.message || enrollErr);
+			}
+		}
+	}
+
+	let quests = [...QuestsStore.quests.values()].filter(x => x.userStatus?.enrolledAt && !x.userStatus?.completedAt && new Date(x.config.expiresAt).getTime() > Date.now() && supportedTasks.find(y => Object.keys((x.config.taskConfig ?? x.config.taskConfigV2).tasks).includes(y)));
+
+	if (quests.length === 0) {
+		console.log("You don't have any uncompleted quests!");
+		return;
+	}
+
 	let doJob = function () {
 		const quest = quests.pop();
-		if (!quest) return;
+		if (!quest) {
+			notifyQuestEvent("queue_completed", null, undefined, undefined, queueStats);
+			console.log(`All quests finished! Succeeded: ${queueStats.succeeded}, Failed: ${queueStats.failed}, Skipped: ${queueStats.skipped}`);
+			return;
+		}
 
 		const pid = (Math.floor(Math.random() * 7500) + 1000) * 4;
 		const observerId = ((nextObserverId++ - 1) % 32) + 1;
@@ -462,6 +646,8 @@ if (quests.length === 0) {
 		const applicationId = quest.config.application?.id ?? taskData.applications?.[0]?.id;
 		const secondsNeeded = taskData.target;
 		let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
+		const estimatedCompleteIso = new Date(Date.now() + Math.max(0, secondsNeeded - secondsDone) * 1000).toISOString();
+		notifyQuestEvent("quest_started", quest, taskName, estimatedCompleteIso);
 
 		if (taskName === "WATCH_VIDEO" || taskName === "WATCH_VIDEO_ON_MOBILE") {
 			const maxFuture = 8, speed = 10, interval = 10;
@@ -477,8 +663,11 @@ if (quests.length === 0) {
 					const timestamp = Math.min(secondsNeeded, secondsDone + speed);
 
 					if (diff >= speed || timestamp >= secondsNeeded) {
-						const jitter = 0.12 + Math.random() * 0.76;
-						const reportedTs = Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
+						const isFinalStep = timestamp >= secondsNeeded;
+						const jitter = Number((0.12 + Math.random() * 0.76).toFixed(3));
+						const reportedTs = isFinalStep
+							? Number((secondsNeeded + 0.015 + Math.random() * 0.045).toFixed(3))
+							: Number(Math.min(secondsNeeded - 0.01, timestamp + jitter).toFixed(3));
 						const res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: reportedTs } });
 						completed = res.body?.completed_at != null;
 						secondsDone = Math.min(secondsNeeded, Math.floor(reportedTs));
@@ -491,10 +680,13 @@ if (quests.length === 0) {
 					await new Promise(resolve => setTimeout(resolve, interval * 1000 + jitterMs));
 				}
 				if (!completed) {
-					const finalTs = Number((secondsNeeded - (0.02 + Math.random() * 0.15)).toFixed(3));
+					const finalTs = Number((secondsNeeded + 0.018 + Math.random() * 0.032).toFixed(3));
 					await httpWithAnalytics.post({ url: `/quests/${quest.id}/video-progress`, body: { timestamp: finalTs } });
 				}
 				console.log("Quest completed!");
+				queueStats.succeeded++;
+				notifyQuestEvent("quest_completed", quest, taskName);
+				await claimQuestReward(quest);
 				doJob();
 			};
 			fn();
@@ -560,19 +752,38 @@ if (quests.length === 0) {
 
 						if (progress >= secondsNeeded) {
 							console.log("Quest completed!");
+							queueStats.succeeded++;
+							notifyQuestEvent("quest_completed", quest, taskName);
+							await claimQuestReward(quest);
 
-							activeSpoof = false;
-							stoppedAt = Date.now();
-							FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: realGetRunningGames() });
 							FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
-							setTimeout(() => {
-								if (RunningGameStore.getRunningGames === mergeFakeGames) {
-									RunningGameStore.getRunningGames = rawGetRunningGames;
-									RunningGameStore.getGameForPID = rawGetGameForPID;
-								}
-							}, 15000);
 
-							doJob();
+							const rawKeepAlive = Number(window.__QUEST_KEEP_ALIVE_MINUTES__);
+							const keepAliveEnabled = window.__QUEST_KEEP_ALIVE_ENABLED__ !== false;
+							const keepAliveMinutes = Number.isFinite(rawKeepAlive) && rawKeepAlive >= 0
+								? rawKeepAlive
+								: (keepAliveEnabled ? (4 + Math.random() * 4) : 0);
+							const keepAliveMs = Math.round(keepAliveMinutes * 60_000);
+
+							const teardownGame = () => {
+								activeSpoof = false;
+								stoppedAt = Date.now();
+								FluxDispatcher.dispatch({ type: "RUNNING_GAMES_CHANGE", removed: [fakeGame], added: [], games: realGetRunningGames() });
+								setTimeout(() => {
+									if (RunningGameStore.getRunningGames === mergeFakeGames) {
+										RunningGameStore.getRunningGames = rawGetRunningGames;
+										RunningGameStore.getGameForPID = rawGetGameForPID;
+									}
+								}, 15000);
+								doJob();
+							};
+
+							if (keepAliveMs > 0) {
+								console.log(`Keeping ${appData.name} active for ${Math.round(keepAliveMs / 1000)}s post-quest cooldown...`);
+								setTimeout(teardownGame, keepAliveMs);
+							} else {
+								teardownGame();
+							}
 						}
 					};
 					FluxDispatcher.subscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
@@ -591,13 +802,16 @@ if (quests.length === 0) {
 					sourceName: null
 				}), realFunc, "getStreamerActiveStreamMetadata");
 
-				let fn = data => {
+				let fn = async data => {
 					if (data.questId && data.questId !== quest.id) return;
 					let progress = quest.config.configVersion === 1 ? data.userStatus.streamProgressSeconds : Math.floor(data.userStatus.progress.STREAM_ON_DESKTOP.value);
 					console.log(`Quest progress: ${progress}/${secondsNeeded}`);
 
 					if (progress >= secondsNeeded) {
 						console.log("Quest completed!");
+						queueStats.succeeded++;
+						notifyQuestEvent("quest_completed", quest, taskName);
+						await claimQuestReward(quest);
 
 						ApplicationStreamingStore.getStreamerActiveStreamMetadata = realFunc;
 						FluxDispatcher.unsubscribe("QUESTS_SEND_HEARTBEAT_SUCCESS", fn);
@@ -722,10 +936,11 @@ if (quests.length === 0) {
 								if (candMeanTtk < minTtk || candMeanTtk > maxTtk) continue;
 								const actualI = Math.max(0, Math.min(1, (1.8 - candMeanTtk) / 1.1));
 								const actualMult = 1.0 + 1.6 * Math.pow(actualI, 1.4);
-								if (Math.round(s * actualMult * 2.0) === T) {
+								const roundedMult = Number(actualMult.toFixed(4));
+								if (Math.round(s * actualMult * 2.0) === T && Math.round(s * roundedMult * 2.0) === T) {
 									chosenS = s;
 									chosenTotalTtkMs = Math.round(candMeanTtk * 5000);
-									chosenTtkMult = Number(actualMult.toFixed(4));
+									chosenTtkMult = roundedMult;
 									return true;
 								}
 							}
@@ -763,14 +978,17 @@ if (quests.length === 0) {
 						const { scoreMode, customScore } = getScoreConfig();
 						const nativeHelper = window.VencordNative?.pluginHelpers?.CompleteDiscordQuest ?? window.VencordNative?.pluginHelpers?.DiscordStealthGuard;
 						const hasNativeSync = typeof nativeHelper?.syncActivityMaxRecords === "function";
+						const isValorantAces = !applicationId || String(applicationId) === "1536318183873454090";
 						let count = 0;
 						for (const iframe of document.querySelectorAll("iframe")) {
 							const src = String(iframe?.src || "");
 							if (src.includes("discordsays.com") && (!applicationId || src.includes(String(applicationId)))) {
+								count++;
+								if (isValorantAces && hasNativeSync) continue;
 								try {
 									for (const titleId of ARISE_TITLES) iframe.contentWindow?.postMessage({ type: "award-title", payload: titleId }, "*");
 									for (const rank of ARISE_BADGES) iframe.contentWindow?.postMessage({ type: "award-badge", payload: rank }, "*");
-									if (!hasNativeSync && scoreMode !== "quest_only") {
+									if (scoreMode !== "quest_only") {
 										for (const meta of ARISE_BOARDS) {
 											const score = scoreMode === "legit_pro"
 												? meta.legitProScore
@@ -781,7 +999,6 @@ if (quests.length === 0) {
 										}
 									}
 									iframe.contentWindow?.postMessage({ type: "quest-completed" }, "*");
-									count++;
 								} catch {}
 							}
 						}
@@ -945,6 +1162,9 @@ if (quests.length === 0) {
 										}).catch(() => null);
 										if (progRes?.ok) {
 											console.log("Quest completed via Activity backend API!");
+											queueStats.succeeded++;
+											notifyQuestEvent("quest_completed", quest, taskName);
+											await claimQuestReward(quest);
 											doJob();
 											return;
 										}
@@ -974,6 +1194,9 @@ if (quests.length === 0) {
 							const curProg = curQ?.userStatus?.progress?.[taskName]?.value ?? 0;
 							if (curQ?.userStatus?.completedAt != null || curProg >= secondsNeeded) {
 								console.log("Quest completed!");
+								queueStats.succeeded++;
+								notifyQuestEvent("quest_completed", quest, taskName);
+								await claimQuestReward(quest);
 								doJob();
 								return;
 							}
@@ -982,8 +1205,10 @@ if (quests.length === 0) {
 
 					while (true) {
 						if (isAchievementTask) broadcastActivityCompletion();
-						const body = { stream_key: streamKey, terminal: false };
+						const isStreamTask = taskName === "STREAM_ON_DESKTOP";
+						const body = { terminal: false };
 						if (applicationId) body.application_id = applicationId;
+						if (isStreamTask) body.stream_key = streamKey;
 						let res;
 						try {
 							res = await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body });
@@ -995,6 +1220,7 @@ if (quests.length === 0) {
 							}
 							if (isAchievementTask && hbErr?.status >= 400 && hbErr?.status < 500) {
 								console.log(`Quest ${questName} (${taskName}) enrolled; awaiting server-side activity achievement event.`);
+								queueStats.skipped++;
 								break;
 							}
 							throw hbErr;
@@ -1003,12 +1229,16 @@ if (quests.length === 0) {
 						console.log(`Quest progress: ${progress}/${secondsNeeded}`);
 
 						if (progress >= secondsNeeded || res?.body?.completed_at != null) {
-							const termBody = { stream_key: streamKey, terminal: true };
+							const termBody = { terminal: true };
 							if (applicationId) termBody.application_id = applicationId;
+							if (isStreamTask) termBody.stream_key = streamKey;
 							try {
 								await httpWithAnalytics.post({ url: `/quests/${quest.id}/heartbeat`, body: termBody });
 							} catch {}
 							console.log("Quest completed!");
+							queueStats.succeeded++;
+							notifyQuestEvent("quest_completed", quest, taskName);
+							await claimQuestReward(quest);
 							break;
 						}
 
@@ -1031,7 +1261,7 @@ if (quests.length === 0) {
 		}
 	};
 	doJob();
-}
+})();
 ```
 </details>
 
@@ -1044,6 +1274,39 @@ if (quests.length === 0) {
 8. You can now claim the reward!
 
 You can track the progress by looking at the `Quest progress:` prints in the Console tab, or by looking at the progress bar in the quests tab.
+
+### Optional Settings
+
+You can customize how the script behaves by defining any of these optional settings in the Console before running the main script:
+
+- **Webhook Notifications (`window.__QUEST_WEBHOOK_URL__`)**
+  - **What it does:** Sends notification updates to your webhook when quests start, make progress, or finish.
+  - **How to use:** Set your webhook address before running the script:
+    ```js
+    window.__QUEST_WEBHOOK_URL__ = "https://your-webhook-url";
+    ```
+
+- **Automatic Enrollment (`window.__QUEST_AUTO_ENROLL__`)**
+  - **What it does:** Automatically accepts available quests so you don't have to click Accept manually. Enabled by default.
+  - **How to use:** Set to `false` if you prefer to accept quests manually:
+    ```js
+    window.__QUEST_AUTO_ENROLL__ = false;
+    ```
+
+- **Automatic Reward Claiming (`window.__QUEST_AUTO_CLAIM__`)**
+  - **What it does:** Automatically claims quest rewards as soon as a quest is finished. Enabled by default.
+  - **How to use:** Set to `false` if you want to claim rewards manually:
+    ```js
+    window.__QUEST_AUTO_CLAIM__ = false;
+    ```
+
+- **Keep-Alive Duration (`window.__QUEST_KEEP_ALIVE_MINUTES__`)**
+  - **What it does:** Keeps activity active for a specified number of minutes after completing a game quest before stopping.
+  - **How to use:** Set the number of minutes to remain active (default is 4 to 8 minutes):
+    ```js
+    window.__QUEST_KEEP_ALIVE_MINUTES__ = 5;
+    ```
+
 
 ## FAQ
 
@@ -1088,7 +1351,7 @@ A: No, there is no way to do that.
 
 **Q: Can you make the script auto accept the quest/reward?**
 
-A: No. Both of those actions may show a captcha, so automating them is not a good idea. Just do the two clicks yourself.
+A: The script automatically accepts available quests and claims rewards upon completion by default. If you prefer to handle them manually, you can set `window.__QUEST_AUTO_ENROLL__ = false;` and `window.__QUEST_AUTO_CLAIM__ = false;` before running the script.
 
 
 **Q: Can you make this a Vencord plugin?**
