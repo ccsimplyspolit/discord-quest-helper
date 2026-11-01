@@ -28,6 +28,7 @@ let UserStore = Object.values(wpRequire.c).find(x => x?.exports?.default?.getCur
 	?? Object.values(wpRequire.c).find(x => x?.exports?.Ay?.getCurrentUser)?.exports?.Ay;
 let api = Object.values(wpRequire.c).find(x => x?.exports?.Bo?.get)?.exports?.Bo;
 let httpWithAnalytics = Object.values(wpRequire.c).find(x => x?.exports?.A?.post && x?.exports?.A?.get && x?.exports?.A !== api)?.exports?.A ?? api;
+let QuestClaimAction = Object.values(wpRequire.c).find(x => typeof x?.exports?.Oq === "function")?.exports?.Oq;
 
 // 0. Sealed Quest Metadata Backfill & Platform Priority Helper (Module 396813 / Module 710969 / Module 738822)
 const REWARD_PLATFORM_PRIORITY = [4, 2, 1, 3, 0]; // PC (4) -> PS5/PlayStation (2) -> Xbox (1) -> Switch (3) -> Cross-Platform (0)
@@ -572,12 +573,27 @@ const claimQuestReward = async (quest) => {
 	try {
 		const platforms = quest?.config?.rewardsConfig?.platforms;
 		const platform = resolvePreferredRewardPlatform(platforms);
-		await httpWithAnalytics.post({
-			url: `/quests/${quest.id}/claim-reward`,
-			body: { platform, location: 1 }
-		});
+		let res;
+		if (typeof QuestClaimAction === "function") {
+			res = await QuestClaimAction(quest.id, platform, 1);
+		} else {
+			res = await httpWithAnalytics.post({
+				url: `/quests/${quest.id}/claim-reward`,
+				body: { platform, location: 1 }
+			});
+			try {
+				FluxDispatcher?.dispatch?.({
+					type: "QUESTS_CLAIM_REWARD_SUCCESS",
+					questId: quest.id,
+					entitlements: res?.body
+				});
+			} catch {}
+		}
 		console.log(`Claimed reward for ${quest.config?.messages?.questName || quest.id} (platform: ${platform})`);
 		notifyQuestEvent("reward_claimed", quest);
+		if (quest?.userStatus) {
+			quest.userStatus.claimedAt = res?.body?.user_status?.claimed_at ?? res?.body?.userStatus?.claimedAt ?? new Date().toISOString();
+		}
 	} catch (err) {
 		console.warn(`Failed to claim reward for ${quest.id}:`, err?.message || err);
 	}

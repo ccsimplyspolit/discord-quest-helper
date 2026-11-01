@@ -6,7 +6,7 @@
 
 import ErrorBoundary from "@components/ErrorBoundary";
 import definePlugin from "@utils/types";
-import { filters, find, findByCodeLazy, findByPropsLazy, waitFor } from "@webpack";
+import { filters, find, findByCodeLazy, findByPropsLazy, findLazy, findModuleId, waitFor, wreq } from "@webpack";
 import { FluxDispatcher, RestAPI, showToast } from "@webpack/common";
 
 import { clearCachedBadgeStats, QuestButton, QuestsCount } from "./components/QuestButton";
@@ -15,8 +15,61 @@ import { AdDeliveryStore, ChannelStore, GuildChannelStore, QuestsStore, RunningG
 import { sendRendererWebhookNotification } from "./webhook";
 
 const QuestApplyAction = findByCodeLazy("type:\"QUESTS_ENROLL_BEGIN\"") as (questId: string, action: QuestAction) => Promise<any>;
-const QuestClaimAction = findByCodeLazy("type:\"QUESTS_CLAIM_REWARD_BEGIN\"") as (questId: string, platform: number, location: number) => Promise<any>;
-const QuestVideoProgressAction = findByCodeLazy("QUEST_VIDEO_PROGRESS", "timestamp_sec") as ((questId: string, timestamp: number) => Promise<any>) | undefined;
+
+// Disambiguate QuestActionCreators (Mod 427495) from BountyActionCreators (Mod 845890) and player components (Mod 753386)
+const QuestActionCreators = findLazy((m: any) => {
+    if (!m || typeof m !== "object") return false;
+    return (typeof m.Oq === "function" && typeof m.uI === "function") ||
+        Object.values(m).some(f =>
+            typeof f === "function" &&
+            Function.prototype.toString.call(f).includes("QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN") &&
+            Function.prototype.toString.call(f).includes("/quests/decision")
+        );
+});
+
+function getQuestClaimAction(): ((questId: string, platform: number, location: number) => Promise<any>) | null {
+    const direct = find(filters.byCode("QUESTS_CLAIM_REWARD_BEGIN"), { isIndirect: true });
+    if (typeof direct === "function") return direct;
+
+    if (QuestActionCreators && typeof (QuestActionCreators as any).Oq === "function") {
+        return (QuestActionCreators as any).Oq;
+    }
+
+    try {
+        if (typeof wreq === "function") {
+            const modId = findModuleId("QUESTS_CLAIM_REWARD_BEGIN", "/quests/decision")
+                ?? findModuleId("QUESTS_CLAIM_REWARD_BEGIN");
+            if (modId) {
+                const mod = wreq(modId);
+                if (mod && typeof mod.Oq === "function") return mod.Oq;
+            }
+        }
+    } catch {}
+
+    return null;
+}
+
+const QuestClaimAction = async (questId: string, platform: number, location: number): Promise<any> => {
+    const fn = getQuestClaimAction();
+    if (typeof fn === "function") {
+        return fn(questId, platform, location);
+    }
+    const res = await RestAPI.post({
+        url: `/quests/${questId}/claim-reward`,
+        body: { platform, location }
+    });
+    try {
+        FluxDispatcher.dispatch({
+            type: "QUESTS_CLAIM_REWARD_SUCCESS",
+            questId,
+            entitlements: res?.body
+        });
+    } catch {}
+    return res?.body;
+};
+
+// Disambiguate QuestVideoProgressAction to uniquely match Mod 427495 (uI) and exclude Mod 753386 (vm)
+const QuestVideoProgressAction = findByCodeLazy("QUEST_VIDEO_PROGRESS", "timestamp_sec", "trackedActionData") as ((questId: string, timestamp: number) => Promise<any>) | undefined;
 const QuestSendHeartbeatAction = findByCodeLazy("QUEST_HEARTBEAT", "is_playtime_eligible") as ((opts: {
     questId: string;
     streamKey?: string;
@@ -742,7 +795,7 @@ async function ensureSealedQuestMetadata(questId?: string): Promise<void> {
                 }
             }
             if (!hasDecisionSealed) {
-                const fetchQuestToDeliver = find(filters.byCode("QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN"), { isIndirect: true });
+                const fetchQuestToDeliver = find(filters.byCode("QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN", "/quests/decision"), { isIndirect: true });
                 if (typeof fetchQuestToDeliver === "function") {
                     promises.push(Promise.resolve(fetchQuestToDeliver(1, "questBar-open")).catch(() => null));
                 }
@@ -786,10 +839,11 @@ function installQuestRestInterceptor() {
         if (!RestAPI || typeof RestAPI.post !== "function" || questRestHookedFns.has(RestAPI.post)) return;
         const rawPost = RestAPI.post;
         const origPost = rawPost.bind(RestAPI);
+        let isHookActive = true;
         const wrappedPost = cloakFunction(function (this: any, ...args: any[]) {
             const req = args[0];
             const url = typeof req === "string" ? req : req?.url;
-            if (typeof url !== "string" || !url.includes("/quests/")) {
+            if (!isHookActive || typeof url !== "string" || !url.includes("/quests/")) {
                 return (origPost as any).apply(this ?? RestAPI, args);
             }
             try {
@@ -893,6 +947,7 @@ function installQuestRestInterceptor() {
         questRestHookedFns.add(wrappedPost);
         RestAPI.post = wrappedPost;
         storeCleanupCallbacks.push(() => {
+            isHookActive = false;
             if (RestAPI.post === wrappedPost) {
                 RestAPI.post = rawPost;
             }
@@ -1056,16 +1111,64 @@ export default definePlugin({
         });
         waitFor(["getDiscordUtils", "setObservedGamesCallback"], (nativeMod: any) => {
             try {
-                const utils = nativeMod?.getDiscordUtils?.();
-                const rawGetFp = utils?.getExecutableFingerprintForProcess;
-                if (utils && typeof rawGetFp === "function" && !isStealthHooked(rawGetFp)) {
-                    const boundGetFp = rawGetFp.bind(utils);
-                    const wrappedGetFp = cloakFunction(function (pid: number) {
+                if (nativeMod && typeof nativeMod.getExecutableFingerprintForProcess === "function" && !isStealthHooked(nativeMod.getExecutableFingerprintForProcess)) {
+                    const rawModGetFp = nativeMod.getExecutableFingerprintForProcess;
+                    const boundModGetFp = rawModGetFp.bind(nativeMod);
+                    const wrappedModGetFp = cloakFunction(function (pid: number) {
                         const fake = self.getGameForPID(pid);
                         if (fake && typeof fake.executableFingerprint === "string" && fake.executableFingerprint.length === 196) {
                             return Promise.resolve(fake.executableFingerprint);
                         }
-                        return boundGetFp(pid);
+                        return boundModGetFp(pid);
+                    }, rawModGetFp, "getExecutableFingerprintForProcess");
+                    nativeMod.getExecutableFingerprintForProcess = wrappedModGetFp;
+                    storeCleanupCallbacks.push(() => {
+                        if (nativeMod.getExecutableFingerprintForProcess === wrappedModGetFp) {
+                            nativeMod.getExecutableFingerprintForProcess = rawModGetFp;
+                        }
+                    });
+                }
+
+                const utils = nativeMod?.getDiscordUtils?.();
+                const rawGetFp = utils?.getExecutableFingerprintForProcess;
+                if (utils && typeof rawGetFp === "function" && !isStealthHooked(rawGetFp)) {
+                    const boundGetFp = rawGetFp.bind(utils);
+                    const wrappedGetFp = cloakFunction(function (this: any, pid: number, ...rest: any[]) {
+                        const fake = self.getGameForPID(pid);
+                        const fakeFp = fake && typeof fake.executableFingerprint === "string" && fake.executableFingerprint.length === 196
+                            ? fake.executableFingerprint
+                            : null;
+
+                        const cb = typeof rest[0] === "function" ? rest[0] : null;
+
+                        if (fakeFp) {
+                            if (cb) {
+                                try {
+                                    if (cb.length >= 2) cb(null, fakeFp);
+                                    else cb(fakeFp);
+                                } catch {}
+                            }
+                            return Promise.resolve(fakeFp);
+                        }
+
+                        if (cb) {
+                            return (boundGetFp as any).call(this ?? utils, pid, cb, ...rest.slice(1));
+                        }
+
+                        if (rawGetFp.length >= 2 || rest.length === 0) {
+                            return new Promise((resolve, reject) => {
+                                try {
+                                    (boundGetFp as any).call(this ?? utils, pid, (err: any, fp: any) => {
+                                        if (err) reject(err);
+                                        else resolve(fp);
+                                    });
+                                } catch (e) {
+                                    reject(e);
+                                }
+                            });
+                        }
+
+                        return (boundGetFp as any).call(this ?? utils, pid, ...rest);
                     }, rawGetFp, "getExecutableFingerprintForProcess");
                     utils.getExecutableFingerprintForProcess = wrappedGetFp;
                     storeCleanupCallbacks.push(() => {
@@ -1830,23 +1933,17 @@ async function processClaimQueue() {
 
                 await ensureSealedQuestMetadata(questId);
                 console.log(`[CompleteDiscordQuest] Claiming completed quest reward: ${questName} (platform=${platform})`);
-                if (typeof QuestClaimAction === "function") {
-                    const res = await QuestClaimAction(questId, platform, location);
-                    if (res?.errors?.length > 0 || res?.body?.captcha_key) {
-                        failedClaimQuestIds.add(questId);
-                        console.warn(`[CompleteDiscordQuest] Auto-claim returned errors for ${questName}:`, JSON.stringify(res?.errors || res?.body || {}));
-                        if (res?.body?.captcha_key || /captcha/i.test(JSON.stringify(res?.errors || ""))) {
-                            abortQueueOnCaptcha = true;
-                        }
-                    } else {
-                        console.log(`[CompleteDiscordQuest] Successfully claimed quest reward: ${questName}`);
-                        notifyQuestEvent("reward_claimed", nextQuest);
+                const res = await QuestClaimAction(questId, platform, location);
+                if (res?.errors?.length > 0 || res?.body?.captcha_key) {
+                    failedClaimQuestIds.add(questId);
+                    console.warn(`[CompleteDiscordQuest] Auto-claim returned errors for ${questName}:`, JSON.stringify(res?.errors || res?.body || {}));
+                    if (res?.body?.captcha_key || /captcha/i.test(JSON.stringify(res?.errors || ""))) {
+                        abortQueueOnCaptcha = true;
                     }
                 } else {
-                    await RestAPI.post({
-                        url: `/quests/${questId}/claim-reward`,
-                        body: { platform, location }
-                    });
+                    if (nextQuest?.userStatus) {
+                        nextQuest.userStatus.claimedAt = res?.body?.user_status?.claimed_at ?? res?.body?.userStatus?.claimedAt ?? new Date().toISOString();
+                    }
                     console.log(`[CompleteDiscordQuest] Successfully claimed quest reward: ${questName}`);
                     notifyQuestEvent("reward_claimed", nextQuest);
                 }

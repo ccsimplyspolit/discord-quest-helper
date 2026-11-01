@@ -135,7 +135,7 @@ const QuestIcon = findByCodeLazy("\"M7.5 21.7a8.95");
 const rawNavigateToQuestHome = findByCodeLazy(".QUEST_HOME,{search:");
 const navigateToQuestHome = () => rawNavigateToQuestHome?.({});
 const TopBarButton = findComponentByCodeLazy(".HEADER_BAR_BADGE_BOTTOM,", 'position:"bottom"');
-const SettingsBarButton = findComponentByCodeLazy("keyboardShortcut", "positionKey");
+const SettingsBarButton = findComponentByCodeLazy(".GREEN,positionKeyStemOverride:");
 const CountBadge = findComponentByCodeLazy("renderBadgeCount", "disableColor");
 
 function questsStatus() {
@@ -299,20 +299,22 @@ export function QuestButton({ type }: { type: "top-bar" | "settings-bar"; }) {
                 onContextMenu={undefined}
                 onClick={navigateToQuestHome}
                 disabled={navigateToQuestHome === undefined}
-                icon={undefined}
-                className={"quest-button"}
-            ><TopBarButton
-                    className={className}
-                    iconClassName={undefined}
-                    disabled={navigateToQuestHome === undefined}
-                    showBadge={state.enrollable > 0 || state.enrolled > 0 || state.claimable > 0}
-                    badgePosition={"bottom"}
-                    icon={QuestIcon}
-                    iconSize={20}
-                    onClick={undefined}
-                    onContextMenu={undefined}
-                    hideOnClick={false}
-                /></SettingsBarButton>
+                icon={QuestIcon}
+                className={`quest-button ${className}`}
+            >
+                {(state.enrollable > 0 || state.enrolled > 0 || state.claimable > 0) && (
+                    <span className={`quest-button-badge ${className}`} style={{
+                        position: "absolute",
+                        bottom: 4,
+                        right: 4,
+                        width: 8,
+                        height: 8,
+                        borderRadius: "50%",
+                        backgroundColor: state.claimable > 0 ? "var(--status-positive)" : state.enrolled > 0 ? "var(--brand-experiment)" : "var(--status-warning)",
+                        pointerEvents: "none"
+                    }} />
+                )}
+            </SettingsBarButton>
         );
     }
 }

@@ -785,7 +785,7 @@ export default definePlugin({
                     replace: "$1=$self.cleanLaunchSignatureUuid($2)"
                 },
                 {
-                    match: /launch_signature:(\i)/g,
+                    match: /launch_signature:(\i)(?!\.)/g,
                     replace: "launch_signature:$self.cleanLaunchSignatureUuid($1)"
                 }
             ]
@@ -1420,7 +1420,7 @@ export default definePlugin({
                     }
                 }
                 if (!hasDecisionSealed) {
-                    const fetchQuestToDeliver = find(filters.byCode("QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN"), { isIndirect: true });
+                    const fetchQuestToDeliver = find(filters.byCode("QUESTS_FETCH_QUEST_TO_DELIVER_BEGIN", "/quests/decision"), { isIndirect: true });
                     if (typeof fetchQuestToDeliver === "function") {
                         promises.push(Promise.resolve(fetchQuestToDeliver(1, "questBar-open")).catch(() => null));
                     }
@@ -1451,11 +1451,12 @@ export default definePlugin({
             const rawPost = RestAPI.post;
             const origPost = rawPost.bind(RestAPI);
             const self = this;
+            let isHookActive = true;
 
             const wrappedPost = cloakFunction(function (this: any, ...args: any[]) {
                 const options = args[0];
                 const url = typeof options === "string" ? options : options?.url;
-                if (!settings.store.guardQuestEndpoints || typeof url !== "string" || !url.includes("/quests/")) {
+                if (!isHookActive || !settings.store.guardQuestEndpoints || typeof url !== "string" || !url.includes("/quests/")) {
                     return (origPost as any).apply(this ?? RestAPI, args);
                 }
 
@@ -1626,7 +1627,10 @@ export default definePlugin({
             stealthRestHookedFns.add(wrappedPost);
             RestAPI.post = wrappedPost;
             cleanupCallbacks.push(() => {
-                RestAPI.post = rawPost;
+                isHookActive = false;
+                if (RestAPI.post === wrappedPost) {
+                    RestAPI.post = rawPost;
+                }
             });
         } catch (e) {
             logger.warn("RestAPI hook warning:", e);
