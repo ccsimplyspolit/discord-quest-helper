@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 220" width="100%" height="100%">
+  <defs>
+    <radialGradient id="glow" cx="0%" cy="0%" r="75%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.16"/>
+      <stop offset="55%" stop-color="#38bdf8" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#0b0e14" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.85"/>
+      <stop offset="50%" stop-color="#34d399" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#1f293d" stop-opacity="0.2"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="220" rx="10" fill="#0b0e14" stroke="#1f293d" stroke-width="1.5"/>
+  <rect width="1080" height="220" rx="10" fill="url(#glow)"/>
+  <rect x="1" y="1" width="1078" height="2" rx="1" fill="url(#rule)"/>
+
+  <line x1="36" y1="142" x2="1044" y2="142" stroke="#1f293d" stroke-width="1"/>
+  <line x1="288" y1="154" x2="288" y2="204" stroke="#1f293d" stroke-width="1"/>
+  <line x1="540" y1="154" x2="540" y2="204" stroke="#1f293d" stroke-width="1"/>
+  <line x1="792" y1="154" x2="792" y2="204" stroke="#1f293d" stroke-width="1"/>
+
+  <rect x="36" y="28" width="3" height="13" fill="#38bdf8"/>
+  <text x="48" y="39" fill="#38bdf8" font-family="'JetBrains Mono', Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="1.5">PE64 &amp; WEBASSEMBLY TELEMETRY REVERSE ENGINEERING // IDA PRO</text>
+
+  <circle cx="835" cy="35" r="4" fill="#34d399"/>
+  <text x="847" y="39" fill="#34d399" font-family="'JetBrains Mono', Consolas, monospace" font-size="11.5" font-weight="600">sub_a3990 / sub_1350 Audit</text>
+
+  <text x="36" y="82" fill="#e2e8f0" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="30" font-weight="700" letter-spacing="-0.6">discord-quest-helper</text>
+  <text x="36" y="114" fill="#94a3b8" font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif" font-size="14.2" font-weight="400">Full Reverse-Engineering Audit of discord_utils.node (146-Byte executableFingerprint) &amp; libdiscore-wasm + Python CLI</text>
+
+  <text x="36" y="168" fill="#94a3b8" font-family="'JetBrains Mono', Consolas, monospace" font-size="10.5" font-weight="600" letter-spacing="1.1">STRUCT PAYLOAD</text>
+  <text x="36" y="194" fill="#38bdf8" font-family="'JetBrains Mono', Consolas, monospace" font-size="16" font-weight="700">146B -> 196B64</text>
+
+  <text x="306" y="168" fill="#94a3b8" font-family="'JetBrains Mono', Consolas, monospace" font-size="10.5" font-weight="600" letter-spacing="1.1">WASM SIGNATURE</text>
+  <text x="306" y="194" fill="#e2e8f0" font-family="'JetBrains Mono', Consolas, monospace" font-size="16" font-weight="700">12-Bit UUIDv4</text>
+
+  <text x="558" y="168" fill="#94a3b8" font-family="'JetBrains Mono', Consolas, monospace" font-size="10.5" font-weight="600" letter-spacing="1.1">CRYPTO ENGINE</text>
+  <text x="558" y="194" fill="#34d399" font-family="'JetBrains Mono', Consolas, monospace" font-size="16" font-weight="700">SHA-256 Stream</text>
+
+  <text x="810" y="168" fill="#94a3b8" font-family="'JetBrains Mono', Consolas, monospace" font-size="10.5" font-weight="600" letter-spacing="1.1">UPSTREAM PRS</text>
+  <text x="810" y="194" fill="#e2e8f0" font-family="'JetBrains Mono', Consolas, monospace" font-size="16" font-weight="700">#28 &amp; #218</text>
+</svg>

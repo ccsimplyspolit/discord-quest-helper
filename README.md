@@ -1,5 +1,7 @@
 # Discord Quest Stealth Suite (`executableFingerprint` + `launch_signature` + Vencord & Console Completer)
 
+<p align="center"><img src="assets/hero-banner.svg" width="100%" alt="discord-quest-helper Banner" /></p>
+
 > **Full Reverse-Engineering Audit (`discord_utils.node` `sub_a3990` / `sub_a4120` / `sub_a3f60` / `sub_1350` & `libdiscore-wasm`) + Stealth-Hardened Console Script, Vencord Plugins, and Python Fingerprint CLI**
 
 [![Console Script Guide](https://img.shields.io/badge/Console_Guide-CompleteDiscordQuest.md-blue?logo=github)](https://github.com/ccsimplyspolit/discord-quest-helper/blob/main/console/CompleteDiscordQuest.md)
